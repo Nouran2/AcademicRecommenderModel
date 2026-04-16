@@ -1,4 +1,3 @@
-%%writefile main.py
 from fastapi import FastAPI, HTTPException
 import pandas as pd
 import requests  # المكتبة الجديدة للاتصال بالباك إند
