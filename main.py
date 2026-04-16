@@ -1,33 +1,44 @@
 from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel # مكتبة لتعريف شكل البيانات
 import pandas as pd
-import requests  # المكتبة الجديدة للاتصال بالباك إند
 from recommender_engine import WanisEngine
 
-app = FastAPI()
+app = FastAPI(title="Wanees Independent API")
 engine = WanisEngine("wanees_model.pkl")
 
-# هنا هغير اللينك ده باللينك اللى الباك اند هيدهولى 
-BACKEND_API_URL = "https://backend-university.com/api/students/"
+# 1. تعريف شكل البيانات اللي الباك إند هيبعتها لك
+class StudentInput(BaseModel):
+    student_id: int
+    CS101: float
+    CS102: float
+    AI201: float
+    AI202: float
+    IT301: float
+    IT302: float
+    IS401: float
+    IS402: float
+    SWE501: float
+    SWE502: float
+    GPA: float
 
-@app.get("/recommend/{student_id}")
-async def recommend(student_id: int):
+@app.post("/recommend") # حولناها لـ POST
+async def recommend(student: StudentInput):
     try:
-        # 1. نطلب بيانات الطالب من API الباك إند بدل الداتابيز المحلية
-        response = requests.get(f"{BACKEND_API_URL}{student_id}")
+        # 2. تحويل البيانات اللي استلمناها لـ DataFrame فوراً
+        # student.dict() بيحول البيانات لـ Dictionary بايثون
+        input_df = pd.DataFrame([student.dict()])
         
-        if response.status_code != 200:
-            raise HTTPException(status_code=404, detail="Student data not found in Backend")
+        # حذف الـ ID قبل ما نبعت للموديل (لأن الموديل مش متدرب عليه)
+        model_input = input_df.drop(columns=['student_id'])
         
-        student_data_json = response.json() 
+        # 3. تشغيل المحرك
+        res = engine.get_recommendation(model_input)
         
-        # 2. تحويل الـ JSON لـ DataFrame عشان الموديل يفهمه
-        # (بفرض إن الباك إند هيبعت الدرجات بنفس أسماء الأعمدة CS101, GPA...)
-        df = pd.DataFrame([student_data_json])
-        
-        # 3. نبعت الداتا للمحرك بتاعنا
-        res = engine.get_recommendation(df)
-        
-        return {"student_id": student_id, "result": res}
+        return {
+            "status": "success",
+            "student_id": student.student_id,
+            "recommendation_results": res
+        }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"API Connection Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Processing Error: {str(e)}")
