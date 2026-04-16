@@ -1,44 +1,38 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel # مكتبة لتعريف شكل البيانات
+from typing import Dict, Any
 import pandas as pd
 from recommender_engine import WanisEngine
 
-app = FastAPI(title="Wanees Independent API")
+app = FastAPI(title="Wanees Production API")
 engine = WanisEngine("wanees_model.pkl")
 
-# 1. تعريف شكل البيانات اللي الباك إند هيبعتها لك
-class StudentInput(BaseModel):
-    student_id: int
-    CS101: float
-    CS102: float
-    AI201: float
-    AI202: float
-    IT301: float
-    IT302: float
-    IS401: float
-    IS402: float
-    SWE501: float
-    SWE502: float
-    GPA: float
+@app.get("/")
+async def root():
+    return {"status": "Wanees AI Service is Online"}
 
-@app.post("/recommend") # حولناها لـ POST
-async def recommend(student: StudentInput):
+@app.post("/recommend")
+async def recommend(student_data: Dict[str, Any]):
     try:
-        # 2. تحويل البيانات اللي استلمناها لـ DataFrame فوراً
-        # student.dict() بيحول البيانات لـ Dictionary بايثون
-        input_df = pd.DataFrame([student.dict()])
+        # تحويل القاموس المستلم لـ DataFrame (بدون التقيد بأسماء محددة في الكود)
+        input_df = pd.DataFrame([student_data])
         
-        # حذف الـ ID قبل ما نبعت للموديل (لأن الموديل مش متدرب عليه)
-        model_input = input_df.drop(columns=['student_id'])
+        # استخراج الـ ID للرد فقط
+        s_id = student_data.get("student_id", "Unknown")
         
-        # 3. تشغيل المحرك
+        # حذف الـ ID قبل المعالجة (لأن الموديل بيتعامل مع الدرجات والـ GPA بس)
+        if "student_id" in input_df.columns:
+            model_input = input_df.drop(columns=['student_id'])
+        else:
+            model_input = input_df
+            
+        # تشغيل المحرك
         res = engine.get_recommendation(model_input)
         
         return {
             "status": "success",
-            "student_id": student.student_id,
+            "student_id": s_id,
             "recommendation_results": res
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Processing Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"AI Engine Error: {str(e)}")
