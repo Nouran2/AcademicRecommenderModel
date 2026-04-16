@@ -1,38 +1,31 @@
 from fastapi import FastAPI, HTTPException
 from typing import Dict, Any
-import pandas as pd
 from recommender_engine import WanisEngine
 
-app = FastAPI(title="Wanees Production API")
+app = FastAPI(title="Wanees Agnostic API")
 engine = WanisEngine("wanees_model.pkl")
-
-@app.get("/")
-async def root():
-    return {"status": "Wanees AI Service is Online"}
 
 @app.post("/recommend")
 async def recommend(student_data: Dict[str, Any]):
     try:
-        # تحويل القاموس المستلم لـ DataFrame (بدون التقيد بأسماء محددة في الكود)
-        input_df = pd.DataFrame([student_data])
+        # 1. استخراج الـ ID (لو موجود)
+        s_id = student_data.pop("student_id", "Unknown")
         
-        # استخراج الـ ID للرد فقط
-        s_id = student_data.get("student_id", "Unknown")
+        # 2. تحويل باقي الـ JSON لقائمة قيم (Values) بالترتيب اللي جات بيه
+        # هنا إحنا مش مهتمين بالأسامي، مهتمين إنهم 11 قيمة + الـ GPA
+        values = list(student_data.values())
         
-        # حذف الـ ID قبل المعالجة (لأن الموديل بيتعامل مع الدرجات والـ GPA بس)
-        if "student_id" in input_df.columns:
-            model_input = input_df.drop(columns=['student_id'])
-        else:
-            model_input = input_df
-            
-        # تشغيل المحرك
-        res = engine.get_recommendation(model_input)
+        if len(values) < 11:
+            raise ValueError(f"Expected at least 11 grades, but got {len(values)}")
+
+        # 3. إرسال القيم للموتور
+        res = engine.get_recommendation(values)
         
         return {
             "status": "success",
             "student_id": s_id,
-            "recommendation_results": res
+            **res
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI Engine Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
