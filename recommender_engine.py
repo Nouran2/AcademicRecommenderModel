@@ -24,9 +24,9 @@ class WanisEngine:
                 "IT": [4, 5],
                 "IS": [6, 7]
             }
-            print("✅ Wanis Engine: Explainable AI Mode Active")
+            print(" Wanis Engine: Explainable AI Mode Active")
         except Exception as e:
-            print(f"❌ Error Loading: {e}")
+            print(f" Error Loading: {e}")
 
     def get_recommendation(self, student_raw_data):
         # 1. المعالجة الرياضية
