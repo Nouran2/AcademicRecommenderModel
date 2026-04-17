@@ -1,29 +1,29 @@
 from fastapi import FastAPI, HTTPException
-from typing import Dict, Any
+import requests # لازم تكون موجودة في الـ requirements.txt
 from recommender_engine import WanisEngine
 
-app = FastAPI(title="Wanees Agnostic API")
+app = FastAPI(title="Wanees Classic Linked API")
 engine = WanisEngine("wanees_model.pkl")
 
-@app.post("/recommend")
-async def recommend(student_data: Dict[str, Any]):
-    try:
-        # 1. استخراج الـ ID (لو موجود)
-        s_id = student_data.pop("student_id", "Unknown")
-        
-        # 2. تحويل باقي الـ JSON لقائمة قيم (Values) بالترتيب اللي جات بيه
-        # هنا إحنا مش مهتمين بالأسامي، مهتمين إنهم 11 قيمة + الـ GPA
-        values = list(student_data.values())
-        
-        if len(values) < 11:
-            raise ValueError(f"Expected at least 11 grades, but got {len(values)}")
+BACKEND_DATA_URL = "https://your-university-backend.com/api/student-grades"
 
-        # 3. إرسال القيم للموتور
-        res = engine.get_recommendation(values)
+@app.get("/recommend/{student_id}") # رجعناها GET عشان بنجيب داتا بالـ ID
+async def recommend(student_id: int):
+    try:
+        # 1. سحب البيانات من سيرفر الباك إند
+        response = requests.get(f"{BACKEND_DATA_URL}/{student_id}")
+        
+        if response.status_code != 200:
+            raise HTTPException(status_code=404, detail="Student data not found in university records")
+        
+        student_data = response.json()
+
+        # 2. تشغيل المحرك بالقاموس (اللي فيه أسامي المواد CS101...)
+        res = engine.get_recommendation(student_data)
         
         return {
             "status": "success",
-            "student_id": s_id,
+            "student_id": student_id,
             **res
         }
         
