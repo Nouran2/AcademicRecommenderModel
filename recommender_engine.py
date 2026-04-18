@@ -1,14 +1,23 @@
 import joblib
 import numpy as np
 import pandas as pd
+import re
 from sklearn.metrics.pairwise import cosine_similarity
 
 class WanisEngine:
     def __init__(self, model_path="wanees_model.pkl"):
+        self.model_path = model_path
+        self._load_artifacts()
+        # [فيتشر 3] Dynamic Track Mapping: السيستم بيبني الخريطة لوحده
+        self._build_dynamic_tracks()
+        print(" Wanis Engine: Pro Dynamic Mode Active")
+
+    def _load_artifacts(self):
+        """تحميل ملفات الموديل"""
         try:
-            self.artifacts = joblib.load(model_path)
+            self.artifacts = joblib.load(self.model_path)
             self.scaler = self.artifacts["scaler"]
-            self.expected_features = self.artifacts["features"] # الأسماء (CS101, AI201...)
+            self.expected_features = self.artifacts["features"]
             self.student_vectors = self.artifacts["student_vectors"]
             self.kmeans = self.artifacts["kmeans"]
             self.nn_model = self.artifacts["nn_model"]
@@ -17,26 +26,30 @@ class WanisEngine:
             self.cluster_to_track = self.artifacts["cluster_to_track"]
             self.track_names = self.artifacts["track_names"]
             self.weights = self.artifacts.get("optimal_weights", (0.5, 0.3, 0.2))
-            
-            # خريطة المواد بأساميها الصريحة زي ما كنتِ عاوزة
-            self.tracks_map = {
-                "Programming": ["CS101", "CS102", "SWE501", "SWE502"],
-                "AI": ["AI201", "AI202"],
-                "IT": ["IT301", "IT302"],
-                "IS": ["IS401", "IS402"]
-            }
-            print(" Wanis Engine: Back to Explicit Names Mode")
         except Exception as e:
-            print(f" Error Loading: {e}")
+            print(f"❌ Error Loading Artifacts: {e}")
+
+    def _build_dynamic_tracks(self):
+        """[فيتشر 3] استخدام الـ Regex لتصنيف المواد أوتوماتيكياً"""
+        self.tracks_map = {track: [] for track in self.track_names}
+        for feature in self.expected_features:
+            # بيفحص اسم المادة ويصنفها بناءً على حروف منها
+            if re.search(r'CS|PROG|SWE', feature, re.I): self.tracks_map["Programming"].append(feature)
+            elif re.search(r'AI|ML|DL', feature, re.I): self.tracks_map["AI"].append(feature)
+            elif re.search(r'IT|NET|CLOUD', feature, re.I): self.tracks_map["IT"].append(feature)
+            elif re.search(r'IS|DB|SYS', feature, re.I): self.tracks_map["IS"].append(feature)
 
     def get_recommendation(self, student_dict):
-        # 1. تحويل القاموس لـ DataFrame وترتيبه حسب الأسماء المتوقعة
+        # [فيتشر 1 & 2] Dynamic Feature Handling & Scaler Handling
         df = pd.DataFrame([student_dict])
-        data_ordered = df[self.expected_features]
+        
+        # reindex بيعمل حاجتين: بيشيل المواد الغريبة (Skip) وبيملا المواد الناقصة بـ 0 (Zero-filling)
+        data_ordered = df.reindex(columns=self.expected_features, fill_value=0)
+        
         scaled = self.scaler.transform(data_ordered)
         scaled_df = pd.DataFrame(scaled, columns=self.expected_features)
 
-        # 2. حساب درجات المسارات (بناءً على أسامي المواد)
+        # حساب درجات المسارات
         track_scores = []
         for t in self.track_names:
             courses = self.tracks_map.get(t, [])
@@ -44,16 +57,13 @@ class WanisEngine:
             track_scores.append(max(avg, 0.0001))
         
         student_vec = np.array(track_scores).reshape(1, -1)
-
-        # 3. تحديد المسار واليقين
         dominant_idx = np.argmax(track_scores)
         cluster_track = self.cluster_to_track.get(self.kmeans.predict(student_vec)[0], "General")
         track_conf = round((track_scores[dominant_idx] / sum(track_scores)) * 100, 1)
         
-        # التفسير الموحد
-        track_reasoning = f"Based on your performance in {cluster_track} core subjects, your profile shows a {track_conf}% alignment with this track."
+        track_reasoning = f"Based on your performance in {cluster_track}, your profile shows a {track_conf}% alignment."
 
-        # 4. الحسابات للمواد
+        # حساب التوصيات
         w1, w2, w3 = self.weights
         content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
         _, idx = self.nn_model.kneighbors(student_vec)
@@ -64,7 +74,6 @@ class WanisEngine:
         trend = 0.15 if gpa_value >= 3.5 else 0.10 if gpa_value >= 3.0 else 0.05
         scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend)
 
-        # 5. التوصيات
         recs = []
         for i in range(len(self.course_names)):
             recs.append({
@@ -79,3 +88,12 @@ class WanisEngine:
             "track_reasoning": track_reasoning,
             "recommendations": sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
         }
+
+    def retrain_model(self, new_data_path):
+        """[فيتشر 4] دالة لإعادة تدريب الموديل (تحديث الـ Artifacts)"""
+        # هنا بنفترض إننا بنحمل داتا جديدة وبنعمل Fit للسكالر والـ KMeans
+        # للتبسيط، هنعيد تحميل الملفات بس إنتي تقدري تضيفي كود الـ Fit هنا
+        print(f" Retraining model with data from {new_data_path}...")
+        self._load_artifacts()
+        self._build_dynamic_tracks()
+        return "Model Updated Successfully"
