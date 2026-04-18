@@ -1,16 +1,36 @@
 from fastapi import FastAPI, HTTPException
-import httpx # مكتبة الـ Async الجديدة
+import httpx
+import json
+import os
 from pydantic import BaseModel, Field
 from typing import Dict, Any
 from recommender_engine import WanisEngine
 
-app = FastAPI(title="Wanees Pro Enterprise API")
+app = FastAPI(title="Wanees Pro Enterprise API - Persistent Mode")
 engine = WanisEngine("wanees_model.pkl")
 
-
+# إعدادات الذاكرة الدائمة
+CACHE_FILE = "recommendations_cache.json"
 BACKEND_DATA_URL = "https://your-university-backend.com/api/student-grades"
 
-# [فيتشر 7] التحقق من صحة البيانات
+# [دالة مساعدة] لتحميل الذاكرة من الملف عند تشغيل السيرفر
+def load_persistent_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+# [دالة مساعدة] لحفظ الذاكرة في الملف فوراً
+def save_to_persistent_cache(cache_data):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache_data, f)
+
+# تحميل الكاش في الذاكرة عند البداية
+recommendation_cache = load_persistent_cache()
+
 class StudentGrades(BaseModel):
     student_id: int
     GPA: float = Field(..., ge=0, le=4.0)
@@ -18,66 +38,59 @@ class StudentGrades(BaseModel):
 
 @app.get("/recommend/{student_id}")
 async def recommend(student_id: int):
+    global recommendation_cache
     try:
-        # [فيتشر 5] نداء غير متزامن
         async with httpx.AsyncClient() as client:
             try:
-                # محاولة طلب الداتا بـ Timeout قصير عشان السيستم ما يفضلش معلق
+                # محاولة جلب البيانات من الباك إند
                 response = await client.get(f"{BACKEND_DATA_URL}/{student_id}", timeout=5.0)
                 
-                # لو الباك إند رد بس قلك الطالب مش موجود (404)
-                if response.status_code != 200:
-                    print(f" Student {student_id} not found, using Cold Start.")
-                    return get_cold_start_recommendations(student_id)
+                if response.status_code == 200:
+                    student_raw = response.json()
+                    
+                    # تحويل البيانات وإرسالها للمحرك
+                    input_for_engine = {
+                        "GPA": student_raw.get("GPA", 0.0),
+                        **{k: v for k, v in student_raw.items() if k != "GPA"}
+                    }
+                    res = engine.get_recommendation(input_for_engine)
+                    
+                    # [تحديث الذاكرة الدائمة]
+                    recommendation_cache[str(student_id)] = res
+                    save_to_persistent_cache(recommendation_cache)
+                    
+                    return {"status": "success", "student_id": student_id, **res}
                 
-                student_raw = response.json()
-            
+                else:
+                    # طالب جديد (Cold Start)
+                    return get_cold_start_recommendations(student_id)
+
             except (httpx.ConnectError, httpx.HTTPError, httpx.TimeoutException):
-                # [تعديل الأمان] لو اللينك وهمي أو السيرفر واقع.. شغل الـ Cold Start بشياكة
-                print(" Backend unreachable or URL invalid. Switching to Cold Start mode.")
-                return get_cold_start_recommendations(student_id)
+                # [سحر الذاكرة الدائمة] لو النت مقطوع، بص في "المذكرات"
+                cached_res = recommendation_cache.get(str(student_id))
+                if cached_res:
+                    print(f"📡 Offline Mode: Serving persistent data for student {student_id}")
+                    return {
+                        "status": "success_from_persistent_cache",
+                        "student_id": student_id,
+                        "note": "This is a stored profile (Backend Offline)",
+                        **cached_res
+                    }
+                else:
+                    return get_cold_start_recommendations(student_id)
 
-        # [فيتشر 7] فحص الداتا اللي جت (عسكري المرور)
-        try:
-            valid_data = StudentGrades(
-                student_id=student_id,
-                GPA=student_raw.get("GPA", 0.0),
-                grades={k: v for k, v in student_raw.items() if k != "GPA"}
-            )
-        except Exception as val_err:
-            raise HTTPException(status_code=422, detail=f"Data Validation Failed: {str(val_err)}")
-
-        # إرسال البيانات للمحرك
-        input_for_engine = {"GPA": valid_data.GPA, **valid_data.grades}
-        res = engine.get_recommendation(input_for_engine)
-        
-        return {
-            "status": "success",
-            "student_id": student_id,
-            **res
-        }
-        
     except Exception as e:
-        # دي الحالة اللي بيطلع فيها 500 لو فيه مشكلة في الكود نفسه مش في النت
-        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 def get_cold_start_recommendations(student_id: int):
-    """[فيتشر 6] التوصيات العامة للطلاب الجدد أو في حالة تعطل السيرفر"""
     return {
         "status": "success_cold_start",
         "student_id": student_id,
         "dominant_track": "General Discovery",
         "track_confidence": "N/A",
-        "track_reasoning": "Welcome! We are currently showing you high-demand academic trends while we synchronize your personal records.",
+        "track_reasoning": "Welcome! We are showing general trends while the backend is unavailable.",
         "recommendations": [
             {"course": "Introduction to AI", "score": 1.0, "confidence": "Trend"},
-            {"course": "Programming Principles", "score": 0.9, "confidence": "Trend"},
-            {"course": "Data Literacy", "score": 0.8, "confidence": "Trend"}
+            {"course": "Programming Principles", "score": 0.9, "confidence": "Trend"}
         ]
     }
-
-@app.post("/admin/retrain")
-async def trigger_retrain(data_path: str):
-    """[فيتشر 4] تحديث الموديل"""
-    result = engine.retrain_model(data_path)
-    return {"message": result}
