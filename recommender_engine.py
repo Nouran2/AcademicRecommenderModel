@@ -8,7 +8,7 @@ class WanisEngine:
     def __init__(self, model_path="wanees_model.pkl"):
         self.model_path = model_path
         self._load_artifacts()
-        #  Dynamic Track Mapping: السيستم بيبني الخريطة لوحده
+        # [فيتشر 3] Dynamic Track Mapping: السيستم بيبني الخريطة لوحده
         self._build_dynamic_tracks()
         print(" Wanis Engine: Pro Dynamic Mode Active")
 
@@ -30,7 +30,7 @@ class WanisEngine:
             print(f" Error Loading Artifacts: {e}")
 
     def _build_dynamic_tracks(self):
-        """Regex لتصنيف المواد أوتوماتيكياً"""
+        """[فيتشر 3] استخدام الـ Regex لتصنيف المواد أوتوماتيكياً"""
         self.tracks_map = {track: [] for track in self.track_names}
         for feature in self.expected_features:
             # بيفحص اسم المادة ويصنفها بناءً على حروف منها
@@ -40,7 +40,7 @@ class WanisEngine:
             elif re.search(r'IS|DB|SYS', feature, re.I): self.tracks_map["IS"].append(feature)
 
     def get_recommendation(self, student_dict):
-        #  Dynamic Feature Handling & Scaler Handling
+        # [فيتشر 1 & 2] Dynamic Feature Handling & Scaler Handling
         df = pd.DataFrame([student_dict])
         
         # reindex بيعمل حاجتين: بيشيل المواد الغريبة (Skip) وبيملا المواد الناقصة بـ 0 (Zero-filling)
@@ -90,7 +90,7 @@ class WanisEngine:
         }
 
     def retrain_model(self, new_data_path):
-        """ دالة لإعادة تدريب الموديل (تحديث الـ Artifacts)"""
+        """[فيتشر 4] دالة لإعادة تدريب الموديل (تحديث الـ Artifacts)"""
         # هنا بنفترض إننا بنحمل داتا جديدة وبنعمل Fit للسكالر والـ KMeans
         # للتبسيط، هنعيد تحميل الملفات بس إنتي تقدري تضيفي كود الـ Fit هنا
         print(f" Retraining model with data from {new_data_path}...")
