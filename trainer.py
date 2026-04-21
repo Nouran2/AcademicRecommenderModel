@@ -9,101 +9,85 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 
 def perform_training(data_url, model_path="wanees_model.pkl"):
-    """
-    دالة التدريب المطورة: تسحب البيانات بأمان وتحدث عقل ونيس أوتوماتيكياً.
-    """
-    print(f" جاري محاولة سحب البيانات من: {data_url}")
-    
-    # جلب مفتاح الأمان من ريندر لضمان صلاحية الوصول
     api_key = os.getenv("AI_API_KEY")
     headers = {"X-AI-API-KEY": api_key}
     
     try:
-        # 1. سحب البيانات باستخدام httpx لتوحيد المكتبات في المشروع
-        with httpx.Client(timeout=30.0) as client:
-            response = client.get(data_url, headers=headers)
-            # التأكد من عدم وجود أخطاء 401 أو 404
-            response.raise_for_status() 
-        print(f" محتوى الداتا اللي واصلة من السيرفر: {response.text[:500]}")
-        # تحويل النص القادم من السيرفر إلى DataFrame
-        data = pd.read_csv(io.StringIO(response.text))
+        # 1. سحب الداتا بنظام الـ JSON لفك التغليف
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.get(data_url, headers=headers)
+            resp.raise_for_status()
+            full_json = resp.json()
         
-        if data.empty:
-            raise ValueError("Training data is empty")
+        raw_students = full_json.get("data", [])
+        if not raw_students:
+            print("⚠️ تحذير: ملف الـ Dump لا يحتوي على بيانات في مفتاح 'data'")
+            return False
 
-        # 2. تجهيز البيانات ديناميكياً
-        # استبعاد المعرفات والـ GPA من عملية الـ Scaling الأساسية للمواد
-        features_to_scale = [col for col in data.columns if col not in ["student_id", "studentId"]]
+        # 2. تحويل الـ JSON المتداخل إلى جدول (Flattening)
+        flattened_data = []
+        for student in raw_students:
+            row = {
+                "student_id": student.get("universityCode"),
+                "GPA": student.get("gpa")
+            }
+            # دمج درجات المواد الدراسية في نفس السطر
+            row.update(student.get("courseGrades", {}))
+            flattened_data.append(row)
+            
+        df = pd.DataFrame(flattened_data)
+        
+        # 3. التجهيز والتدريب
+        # استبعاد المعرفات فقط
+        feature_cols = [c for c in df.columns if c not in ["student_id", "universityCode"]]
         
         scaler = StandardScaler()
-        data_scaled = data.copy()
-        data_scaled[features_to_scale] = scaler.fit_transform(data[features_to_scale])
+        # تعبئة القيم المفقودة بـ 0 لضمان استقرار التدريب
+        df_filled = df[feature_cols].fillna(0)
+        scaled_data = scaler.fit_transform(df_filled)
         
-        # 3. حساب المسارات (Tracks) بناءً على لوائح جامعة المنصورة
         track_names = ["Programming", "AI", "IT", "IS"]
-        tracks = {
+        tracks_config = {
             "Programming": ["CS101", "CS102", "SWE501", "SWE502"],
             "AI": ["AI201", "AI202"],
             "IT": ["IT301", "IT302"],
             "IS": ["IS401", "IS402"]
         }
         
-        # التأكد من وجود المواد في البيانات قبل الحساب لتجنب الأخطاء
-        for track, courses in tracks.items():
-            existing_courses = [c for c in courses if c in data_scaled.columns]
-            if existing_courses:
-                data_scaled[track] = data_scaled[existing_courses].mean(axis=1)
-            else:
-                data_scaled[track] = 0.0 # قيمة افتراضية لو المواد مش موجودة
+        # حساب متوسطات المسارات
+        track_df = pd.DataFrame(index=df.index)
+        for t, courses in tracks_config.items():
+            # تحويل أسماء المواد للحروف الصغيرة لمطابقة رد الجامعة لو لزم الأمر
+            existing = [c for c in df.columns if c.upper() in [x.upper() for x in courses]]
+            track_df[t] = df[existing].mean(axis=1).fillna(0) if existing else 0
+            
+        student_vectors = track_df.values
         
-        student_vectors = data_scaled[track_names].values
-        
-        # 4. التدريب الأساسي (Clustering & Neighbors)
         kmeans = KMeans(n_clusters=4, random_state=42, n_init=10)
         clusters = kmeans.fit_predict(student_vectors)
-        
         nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors)
         
-        # 5. بناء خريطة التراكات والمواد الاختيارية
+        # 4. الـ Electives والـ Artifacts
         electives = {
-            "Advanced_AI": [0.2, 0.9, 0.2, 0.2], 
-            "Cyber_Security": [0.5, 0.3, 0.9, 0.2],
-            "Cloud_Computing": [0.4, 0.2, 0.8, 0.5], 
-            "Data_Engineering": [0.8, 0.7, 0.4, 0.3],
-            "Digital_Business": [0.2, 0.2, 0.3, 0.9], 
-            "Machine_Learning": [0.3, 0.95, 0.2, 0.2],
+            "Advanced_AI": [0.2, 0.9, 0.2, 0.2], "Cyber_Security": [0.5, 0.3, 0.9, 0.2],
+            "Cloud_Computing": [0.4, 0.2, 0.8, 0.5], "Data_Engineering": [0.8, 0.7, 0.4, 0.3],
+            "Digital_Business": [0.2, 0.2, 0.3, 0.9], "Machine_Learning": [0.3, 0.95, 0.2, 0.2],
             "Web_Development": [0.9, 0.2, 0.3, 0.4]
         }
         
-        # تحديد المسار المهيمن لكل مجموعة
-        cluster_to_track = {}
-        for cluster_id in range(4):
-            cluster_mask = (clusters == cluster_id)
-            if np.any(cluster_mask):
-                avg_profile = student_vectors[cluster_mask].mean(axis=0)
-                cluster_to_track[cluster_id] = track_names[np.argmax(avg_profile)]
-            else:
-                cluster_to_track[cluster_id] = "General"
+        cluster_to_track = {i: track_names[np.argmax(student_vectors[clusters==i].mean(axis=0))] for i in range(4)}
 
-        # 6. بناء وحفظ الـ Artifacts
-        # ملحوظة: الـ features هنا بتستخدم features_to_scale عشان الـ engine يعرف يرتب الأعمدة
         artifacts = {
-            "scaler": scaler,
-            "features": features_to_scale,
-            "kmeans": kmeans,
-            "nn_model": nn_model,
-            "student_vectors": student_vectors,
-            "cluster_to_track": cluster_to_track,
-            "track_names": track_names,
+            "scaler": scaler, "features": feature_cols, "kmeans": kmeans,
+            "nn_model": nn_model, "student_vectors": student_vectors,
+            "cluster_to_track": cluster_to_track, "track_names": track_names,
             "course_vectors": np.array(list(electives.values())),
-            "course_names": list(electives.keys()),
-            "optimal_weights": (0.5, 0.3, 0.2)
+            "course_names": list(electives.keys()), "optimal_weights": (0.5, 0.3, 0.2)
         }
         
         joblib.dump(artifacts, model_path)
-        print(f" تم تحديث الموديل بنجاح في: {model_path}")
+        print(f"✅ تم تحديث الموديل بنجاح.")
         return True
-        
     except Exception as e:
-        print(f" خطأ في التدريب: {str(e)}")
+        print(f"❌ خطأ في التدريب: {e}")
         return False
