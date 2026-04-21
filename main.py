@@ -48,7 +48,7 @@ async def startup_event():
     global engine, http_client
     engine = WanisEngine(MODEL_PATH)
     http_client = httpx.AsyncClient(timeout=custom_timeout)
-    logger.info("✅ ونيس جاهز للعمل.")
+    logger.info(" ونيس جاهز للعمل.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
