@@ -21,7 +21,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
         
         raw_students = full_json.get("data", [])
         if not raw_students:
-            print("⚠️ تحذير: ملف الـ Dump لا يحتوي على بيانات في مفتاح 'data'")
+            print(" تحذير: ملف الـ Dump لا يحتوي على بيانات في مفتاح 'data'")
             return False
 
         # 2. تحويل الـ JSON المتداخل إلى جدول (Flattening)
@@ -86,8 +86,8 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
         }
         
         joblib.dump(artifacts, model_path)
-        print(f"✅ تم تحديث الموديل بنجاح.")
+        print(f" تم تحديث الموديل بنجاح.")
         return True
     except Exception as e:
-        print(f"❌ خطأ في التدريب: {e}")
+        print(f" خطأ في التدريب: {e}")
         return False
