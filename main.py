@@ -49,7 +49,7 @@ MODEL_PATH = "wanees_model.pkl"
 def verify_admin(x_admin_key: str = Header(...)):
     """التحقق من المفتاح السري الذي قمتِ بإضافته لضمان أمان عملية إعادة التدريب"""
     if x_admin_key != ADMIN_KEY:
-        logger.warning("🚫 محاولة دخول غير مصرح بها لعملية الـ Retrain")
+        logger.warning(" محاولة دخول غير مصرح بها لعملية الـ Retrain")
         raise HTTPException(status_code=403, detail="Unauthorized Admin Access")
 
 # =================================
@@ -61,17 +61,17 @@ async def startup_event():
     logger.info("⏳ جاري تحميل محرك ونيس والعميل الرقمي...")
     
     if not os.path.exists(MODEL_PATH):
-        logger.error("❌ ملف الموديل %s غير موجود في المسار الحالي!", MODEL_PATH)
+        logger.error(" ملف الموديل %s غير موجود في المسار الحالي!", MODEL_PATH)
     
     engine = WanisEngine(MODEL_PATH)
     http_client = httpx.AsyncClient(timeout=custom_timeout)
-    logger.info("✅ النظام جاهز لاستقبال الطلبات.")
+    logger.info(" النظام جاهز لاستقبال الطلبات.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     if http_client:
         await http_client.aclose()
-        logger.info("🛑 تم إغلاق العميل الرقمي بنجاح.")
+        logger.info(" تم إغلاق العميل الرقمي بنجاح.")
 
 # =================================
 # 5. نقطة التوصية (The Core Logic)
@@ -85,7 +85,7 @@ async def recommend(student_id: str):
 
     # فحص الكاش لسرعة استجابة النظام (Performance Optimization)
     if clean_id in student_cache:
-        logger.info("⚡ Cache hit للطلب: %s", clean_id)
+        logger.info(" Cache hit للطلب: %s", clean_id)
         async with engine_lock:
             res = engine.get_recommendation(student_cache[clean_id])
         return {"status": "success", "source": "cache", **res}
@@ -116,13 +116,13 @@ async def recommend(student_id: str):
                     res = engine.get_recommendation(student_info)
                 return {"status": "success", "source": "university_api", **res}
             
-            elif response.status_code == 404:
+            elif response.status_code in [400, 404]:
                 return await get_dynamic_cold_start(clean_id)
             
             break 
         except Exception as e:
             if attempt == 2:
-                logger.error("💥 فشل نهائي بعد 3 محاولات للطالب %s: %s", clean_id, str(e))
+                logger.error(" فشل نهائي بعد 3 محاولات للطالب %s: %s", clean_id, str(e))
                 raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب")
             await asyncio.sleep(1)
 
@@ -147,12 +147,12 @@ async def get_dynamic_cold_start(student_id: str):
 # =================================
 async def retrain_safe():
     async with retrain_lock:
-        logger.info("🔄 بدأت عملية إعادة تدريب الموديل أوتوماتيكياً...")
+        logger.info(" بدأت عملية إعادة تدريب الموديل أوتوماتيكياً...")
         loop = asyncio.get_running_loop()
         # تشغيل التدريب في خيط منفصل (Thread) لضمان استجابة السيرفر للطلاب
         await loop.run_in_executor(None, engine.retrain_model, ANALYTICS_DUMP_URL)
         student_cache.clear() # مسح الكاش لضمان دقة التوصيات الجديدة
-        logger.info("✅ تم تحديث الموديل وتصفير الكاش.")
+        logger.info(" تم تحديث الموديل وتصفير الكاش.")
 
 @app.post("/retrain")
 async def retrain_endpoint(background_tasks: BackgroundTasks, admin=Depends(verify_admin)):
