@@ -1,108 +1,174 @@
 import os
-from fastapi import FastAPI, HTTPException
-import httpx 
-from pydantic import BaseModel, Field 
-from typing import Dict, Any, List
+import logging
+import httpx
+import asyncio
+from fastapi import FastAPI, HTTPException, BackgroundTasks, status
+from pydantic import BaseModel, Field
+from typing import Dict, Optional
+from cachetools import TTLCache
 from recommender_engine import WanisEngine
 
-app = FastAPI(title="Wanees Dynamic AI API - Professional Edition")
-engine = WanisEngine("wanees_model.pkl")
+# =================================
+# 1. إعداد الـ Logging (مراقبة النظام)
+# =================================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("wanees")
 
-# =================================================================
-# 🚩 إعدادات الربط الرسمي
-# =================================================================
-BASE_URL = "https://rafeek-live.runasp.net" 
-AI_API_KEY = os.getenv("AI_API_KEY") 
+app = FastAPI(title="Wanees Production API")
 
-# [فيتشر 5] حماية المفتاح والروابط
+# =================================
+# 2. الثوابت والروابط
+# =================================
+BASE_URL = "https://rafeek-live.runasp.net"
+AI_API_KEY = os.getenv("AI_API_KEY")
+
 if not AI_API_KEY:
-    # ملاحظة: دي هتوقف السيرفر فوراً لو نسيتي تظبطي الـ Key في Render
-    print("CRITICAL ERROR: AI_API_KEY is missing!")
-
-HEADERS = {"X-AI-API-KEY": AI_API_KEY} if AI_API_KEY else {}
+    logger.error(" AI_API_KEY is missing from Environment Variables!")
 
 STUDENT_GRADES_URL = BASE_URL + "/v1/api/ai/student/{student_id}/grades"
 COURSE_CATALOG_URL = BASE_URL + "/v1/api/ai/course/catalog"
 ANALYTICS_DUMP_URL = BASE_URL + "/v1/api/ai/analytics/dump"
 
-# =================================================================
+# إعدادات الـ Timeout (وقت الانتظار)
+custom_timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
-# [فيتشر 7] كلاس الـ Validation (عسكري المرور للداتا)
-class StudentGrades(BaseModel):
-    student_id: str
-    GPA: float = Field(..., ge=0, le=4.0)
-    grades: Dict[str, float]
+# =================================
+# 3. الأجسام العالمية (Globals)
+# =================================
+engine: Optional[WanisEngine] = None
+http_client: Optional[httpx.AsyncClient] = None
 
+# أقفال التزامن (Locks) لمنع تداخل العمليات
+engine_lock = asyncio.Lock()
+retrain_lock = asyncio.Lock()
+
+# الكاش (تخزين مؤقت لـ 1000 طالب لمدة 10 دقائق)
+student_cache = TTLCache(maxsize=1000, ttl=600)
+
+MODEL_PATH = "wanees_model.pkl"
+
+# =================================
+# 4. نماذج البيانات (Pydantic Models)
+# =================================
+class CourseGrades(BaseModel):
+    gpa: float = Field(..., ge=0, le=4.0, alias="GPA")
+    courseGrades: Dict[str, float] = Field(default_factory=dict)
+
+    class Config:
+        allow_population_by_field_name = True
+
+class UniversityResponse(BaseModel):
+    data: CourseGrades
+
+# =================================
+# 5. أحداث التشغيل والإغلاق
+# =================================
+@app.on_event("startup")
+async def startup_event():
+    global engine, http_client
+    logger.info(" System starting: Loading model and HTTP client...")
+    
+    if not os.path.exists(MODEL_PATH):
+        logger.error(" Model file %s not found!", MODEL_PATH)
+        # ملاحظة: في بيئة الإنتاج يفضل ألا يتوقف السيرفر بل يعطي رسالة خطأ
+    
+    engine = WanisEngine(MODEL_PATH)
+    http_client = httpx.AsyncClient(timeout=custom_timeout)
+    logger.info(" System ready and model loaded.")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    if http_client:
+        await http_client.aclose()
+        logger.info(" HTTP client closed.")
+
+# =================================
+# 6. نقطة نهاية التوصيات (Recommendation)
+# =================================
 @app.get("/recommend/{student_id}")
 async def recommend(student_id: str):
-    """ربط ديناميكي مع تفعيل الفحص التلقائي للداتا"""
-    
-    if not AI_API_KEY:
-        raise HTTPException(status_code=500, detail="الإعدادات ناقصة: AI_API_KEY غير موجود.")
+    if engine is None:
+        raise HTTPException(status_code=503, detail="Model not ready")
 
-    async with httpx.AsyncClient() as client:
+    clean_id = student_id.strip()
+
+    # فحص الكاش (لسرعة الاستجابة)
+    if clean_id in student_cache:
+        logger.info(" Cache hit for student: %s", clean_id)
+        async with engine_lock:
+            res = engine.get_recommendation(student_cache[clean_id])
+        return {"status": "success", "source": "cache", **res}
+
+    # محاولة جلب البيانات من الجامعة (3 محاولات)
+    for attempt in range(3):
         try:
-            target_url = STUDENT_GRADES_URL.format(student_id=student_id.strip())
-            response = await client.get(target_url, headers=HEADERS, timeout=15.0)
+            url = STUDENT_GRADES_URL.format(student_id=clean_id)
+            response = await http_client.get(url, headers={"X-AI-API-KEY": AI_API_KEY})
             
-            # 1. حالة النجاح (200)
             if response.status_code == 200:
-                payload = response.json()
-                data_content = payload.get("data", {})
+                validated = UniversityResponse(**response.json())
+                student_info = {
+                    "GPA": validated.data.gpa,
+                    **validated.data.courseGrades
+                }
                 
-                # [🚨 تفعيل فيتشر 7] التأكد من أن الداتا مطابقة للمواصفات قبل المعالجة
-                try:
-                    valid_student = StudentGrades(
-                        student_id=student_id,
-                        GPA=float(data_content.get("gpa", 0.0)),
-                        grades=data_content.get("courseGrades", {})
-                    )
-                except Exception as val_e:
-                    raise HTTPException(status_code=422, detail=f"الداتا القادمة من الجامعة بها أخطاء: {str(val_e)}")
-
-                # [تطبيق فيتشر 1, 2, 3] إرسال الداتا النظيفة للمحرك
-                res = engine.get_recommendation({"GPA": valid_student.GPA, **valid_student.grades})
-                return {"status": "success", "source": "University Database", **res}
+                student_cache[clean_id] = student_info
+                
+                async with engine_lock:
+                    res = engine.get_recommendation(student_info)
+                
+                return {"status": "success", "source": "university_api", **res}
             
-            # 2. حالة الطالب غير موجود (404) -> تفعيل فيتشر 6
             elif response.status_code == 404:
-                return await get_dynamic_cold_start(student_id, client, "Record not found.")
+                return await get_dynamic_cold_start(clean_id)
             
-            # 3. خطأ في الصلاحيات (401)
-            elif response.status_code == 401:
-                raise HTTPException(status_code=401, detail="المفتاح السري (API Key) مرفوض من قبل سيرفر الجامعة.")
-            
-            else:
-                raise HTTPException(status_code=response.status_code, detail=f"خطأ غير متوقع: {response.text}")
+        except httpx.RequestError:
+            if attempt == 2:
+                logger.error(" All retry attempts failed for student: %s", clean_id)
+                raise HTTPException(status_code=503, detail="University API unreachable")
+            await asyncio.sleep(1)
 
-        except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="السيرفر استغرق وقتاً طويلاً في الرد.")
-        except Exception as e:
-            if isinstance(e, HTTPException): raise e
-            raise HTTPException(status_code=503, detail=f"فشل الاتصال: {str(e)}")
+    raise HTTPException(status_code=503, detail="Failed after multiple retries")
 
-async def get_dynamic_cold_start(student_id: str, client: httpx.AsyncClient, reason: str):
-    """[فيتشر 6 المطور] سحب مواد حقيقية من الكتالوج"""
+# =================================
+# 7. الكولد ستارت (Cold Start)
+# =================================
+async def get_dynamic_cold_start(student_id: str):
     try:
-        cat_resp = await client.get(COURSE_CATALOG_URL, headers=HEADERS, timeout=5.0)
-        if cat_resp.status_code == 200:
-            catalog = cat_resp.json()
-            recs = [{"course": str(c.get("name", "General Course")), "score": 1.0} for c in catalog[:3]]
-        else:
-            recs = [{"course": "Intro to AI", "score": 1.0}]
-    except:
-        recs = [{"course": "General Science", "score": 1.0}]
+        resp = await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})
+        catalog = resp.json() if resp.status_code == 200 else []
+        recs = [{"course": str(c.get("name", "Intro Course")), "score": 1.0} for c in catalog[:3]]
+    except Exception:
+        recs = [{"course": "General Computer Science", "score": 1.0}]
+    
+    return {"status": "cold_start", "student_id": student_id, "recommendations": recs}
 
-    return {
-        "status": "new_student_cold_start",
-        "student_id": student_id,
-        "message": "لم نجد سجلات لك، هذه ترشيحات من مواد الكلية المتاحة حالياً.",
-        "recommendations": recs
-    }
+# =================================
+# 8. إعادة التدريب (Retrain)
+# =================================
+async def retrain_safe():
+    async with retrain_lock:
+        logger.info(" Retraining process started...")
+        # استخدام run_in_executor لمنع حظر الـ Event Loop أثناء التدريب
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, engine.retrain_model, ANALYTICS_DUMP_URL)
+        
+        cache_size = len(student_cache)
+        student_cache.clear() # مسح الكاش ضروري بعد تحديث الموديل
+        logger.info(" Retraining finished. Cache cleared (%s items).", cache_size)
 
-# [فيتشر 4] إضافة نقطة تحديث الموديل
-@app.post("/admin/retrain")
-async def trigger_retrain():
-    """تحديث الموديل أوتوماتيكياً من بيانات الـ Dump"""
-    status = engine.retrain_model(ANALYTICS_DUMP_URL)
-    return {"message": "Model retrained successfully", "status": status}
+@app.post("/retrain")
+async def retrain_endpoint(background_tasks: BackgroundTasks):
+    # تم إزالة التحقق من الأدمن كما طلبتِ لسهولة التجربة
+    background_tasks.add_task(retrain_safe)
+    return {"message": "Retraining task triggered successfully."}
+
+# =================================
+# 9. فحص الحالة (Health Check)
+# =================================
+@app.get("/health")
+def health():
+    return {"status": "active", "model_loaded": engine is not None}
