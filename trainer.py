@@ -24,7 +24,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             response = client.get(data_url, headers=headers)
             # التأكد من عدم وجود أخطاء 401 أو 404
             response.raise_for_status() 
-        
+        print(f" محتوى الداتا اللي واصلة من السيرفر: {response.text[:500]}")
         # تحويل النص القادم من السيرفر إلى DataFrame
         data = pd.read_csv(io.StringIO(response.text))
         
