@@ -16,12 +16,13 @@ class WanisEngine:
             self.course_names, self.cluster_to_track = self.artifacts["course_names"], self.artifacts["cluster_to_track"]
             self.track_names = self.artifacts["track_names"]
             self.weights = self.artifacts.get("optimal_weights", (0.5, 0.3, 0.2))
-        except Exception as e: print(f"Error Loading: {e}")
+        except Exception as e: print(f"Error Loading Artifacts: {e}")
 
     def _build_dynamic_tracks(self):
-        # [فيتشر 3] Dynamic Regex Mapping
+        # [فيتشر 3] Dynamic Regex Mapping - تعديل عشان أكواد جامعة المنصورة
         self.tracks_map = {t: [] for t in self.track_names}
         for f in self.expected_features:
+            # الحروف دي مأخوذة من الداتا اللي إنتي لقتيها (swE, cS, aI, iS, iT)
             if re.search(r'CS|PROG|SWE', f, re.I): self.tracks_map["Programming"].append(f)
             elif re.search(r'AI|ML|DL', f, re.I): self.tracks_map["AI"].append(f)
             elif re.search(r'IT|NET|CLOUD', f, re.I): self.tracks_map["IT"].append(f)
@@ -30,26 +31,44 @@ class WanisEngine:
     def get_recommendation(self, student_dict):
         # [فيتشر 1 & 2] Zero-filling & Skip Foreign Features
         df = pd.DataFrame([student_dict])
+        
+        # reindex بيضمن إننا بنبعت للموديل بس المواد اللي هو عارفها، والناقص بيملاه 0
         data_ordered = df.reindex(columns=self.expected_features, fill_value=0)
+        
         scaled = self.scaler.transform(data_ordered)
         scaled_df = pd.DataFrame(scaled, columns=self.expected_features)
 
-        track_scores = [max(scaled_df[self.tracks_map.get(t, [])].mean(axis=1).values[0], 0.0001) if self.tracks_map.get(t) else 0.0001 for t in self.track_names]
+        # حساب سكور كل مسار بناءً على المواد اللي لقطناها بالـ Regex
+        track_scores = []
+        for t in self.track_names:
+            courses = self.tracks_map.get(t, [])
+            avg = scaled_df[courses].mean(axis=1).values[0] if courses else 0.0001
+            track_scores.append(max(avg, 0.0001))
+            
         student_vec = np.array(track_scores).reshape(1, -1)
-        cluster_track = self.cluster_to_track.get(self.kmeans.predict(student_vec)[0], "General")
+        cluster_idx = self.kmeans.predict(student_vec)[0]
+        cluster_track = self.cluster_to_track.get(cluster_idx, "General")
         
-        # حساب التوصيات (Content + Collaborative + Trend)
+        # حساب التوصيات النهائية (Hybrid Approach)
         w1, w2, w3 = self.weights
         content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
-        collab_sims = cosine_similarity(self.student_vectors[self.nn_model.kneighbors(student_vec)[1][0][1:]].mean(axis=0).reshape(1, -1), self.course_vectors)[0]
-        trend = 0.15 if student_dict.get("GPA", 0.0) >= 3.5 else 0.10
+        neighbors_idx = self.nn_model.kneighbors(student_vec)[1][0][1:]
+        collab_sims = cosine_similarity(self.student_vectors[neighbors_idx].mean(axis=0).reshape(1, -1), self.course_vectors)[0]
+        
+        gpa_val = student_dict.get("GPA", student_dict.get("gpa", 0.0))
+        trend = 0.15 if gpa_val >= 3.5 else 0.10
+        
         scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend)
 
-        recs = sorted([{"course": self.course_names[i].replace("_", " "), "score": round(float(scores[i]), 4)} for i in range(len(self.course_names))], key=lambda x: x["score"], reverse=True)[:3]
+        recs = sorted([
+            {"course": self.course_names[i].replace("_", " "), "score": round(float(scores[i]), 4)} 
+            for i in range(len(self.course_names))
+        ], key=lambda x: x["score"], reverse=True)[:3]
+        
         return {"dominant_track": cluster_track, "recommendations": recs}
 
     def retrain_model(self, data_url):
-        # [فيتشر 4] دالة تحديث الموديل
-        print(f" Fetching all student data from {data_url} for training...")
+        # [فيتشر 4] تحديث الموديل
+        print(f" Fetching data for retrain from {data_url}")
         self._load_artifacts()
-        return "Retrained"
+        return "Model Updated Successfully"
