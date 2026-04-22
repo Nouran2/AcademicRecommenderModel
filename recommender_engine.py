@@ -69,7 +69,7 @@ class WanisEngine:
                 # فلترة حسب التخصص (الإصلاح رقم 1)
                 if not any(course_code.startswith(p) for p in allowed_prefixes):
                     continue
-
+               
                 # منع تكرار المواد المأخوذة
                 if course_code in taken_courses:
                     continue
@@ -86,6 +86,14 @@ class WanisEngine:
                     "score": round(score, 4),
                     "confidence": f"{confidence_val}%"
                 })
+           if len(recs) < 2:
+                for i in range(len(self.course_codes)):
+                    code = self.course_codes[i]
+                    if code in taken_courses or any(r["course_code"] == code for r in recs): continue
+                    
+                    score = float(final_scores[i])
+                    confidence_val = round((score / max_final) * 100, 1)
+                    recs.append({"course_code": code, "course_name": self.course_names[i], "score": score, "confidence": f"{confidence_val}%"})    
             
             return {
                 "dominant_track": dominant_track,
