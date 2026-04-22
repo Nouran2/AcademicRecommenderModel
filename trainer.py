@@ -13,7 +13,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
     headers = {"X-AI-API-KEY": api_key}
     
     try:
-        # 1. سحب الداتا بنظام الـ JSON لفك التغليف
+        # 1. سحب البيانات بنظام الـ JSON
         with httpx.Client(timeout=60.0) as client:
             resp = client.get(data_url, headers=headers)
             resp.raise_for_status()
@@ -24,31 +24,26 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             print(" تحذير: ملف الـ Dump لا يحتوي على بيانات في مفتاح 'data'")
             return False
 
-        # 2. تحويل الـ JSON المتداخل إلى جدول (Flattening)
+        # 2. تحويل الـ JSON المتداخل إلى جدول (Corrected Logic)
         flattened_data = []
         for student in raw_students:
+            # سحب المواد الخام
+            raw_grades = student.get("courseGrades", {})
+            
+            # بناء سطر الطالب مع توحيد حالة الأحرف فوراً
             row = {
-                "student_id": student.get("universityCode"),
-                "GPA": student.get("gpa")
+                "STUDENT_ID": student.get("universityCode"),
+                "GPA": student.get("gpa"),
+                **{k.upper(): v for k, v in raw_grades.items()}
             }
-            # دمج درجات المواد الدراسية في نفس السطر
-            row.update(student.get("courseGrades", {}))
-            # تحويل كل أسماء المواد إلى UPPERCASE
-            grades_upper={
-                k.upper() : v
-                for k,v in grades.items()
-            }
-            row.update(grades_upper)
             flattened_data.append(row)
             
         df = pd.DataFrame(flattened_data)
         
         # 3. التجهيز والتدريب
-        # استبعاد المعرفات فقط
-        feature_cols = [c for c in df.columns if c not in ["student_id", "universityCode"]]
+        feature_cols = [c for c in df.columns if c not in ["STUDENT_ID", "GPA"]]
         
         scaler = StandardScaler()
-        # تعبئة القيم المفقودة بـ 0 لضمان استقرار التدريب
         df_filled = df[feature_cols].fillna(0)
         scaled_data = scaler.fit_transform(df_filled)
         
@@ -60,11 +55,11 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             "IS": ["IS401", "IS402"]
         }
         
-        # حساب متوسطات المسارات
+        # حساب مصفوفة المسارات
         track_df = pd.DataFrame(index=df.index)
         for t, courses in tracks_config.items():
-            # تحويل أسماء المواد للحروف الصغيرة لمطابقة رد الجامعة لو لزم الأمر
-            existing = [c for c in df.columns if c.upper() in [x.upper() for x in courses]]
+            # البحث عن المواد بالحروف الكبيرة لمطابقة الجدول الجديد
+            existing = [c for c in df.columns if c in [x.upper() for x in courses]]
             track_df[t] = df[existing].mean(axis=1).fillna(0) if existing else 0
             
         student_vectors = track_df.values
@@ -73,7 +68,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
         clusters = kmeans.fit_predict(student_vectors)
         nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors)
         
-        # 4. الـ Electives والـ Artifacts
+        # 4. بناء الـ Artifacts
         electives = {
             "Advanced_AI": [0.2, 0.9, 0.2, 0.2], "Cyber_Security": [0.5, 0.3, 0.9, 0.2],
             "Cloud_Computing": [0.4, 0.2, 0.8, 0.5], "Data_Engineering": [0.8, 0.7, 0.4, 0.3],
