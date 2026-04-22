@@ -33,6 +33,12 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             }
             # دمج درجات المواد الدراسية في نفس السطر
             row.update(student.get("courseGrades", {}))
+            # تحويل كل أسماء المواد إلى UPPERCASE
+            grades_upper={
+                k.upper() : v
+                for k,v in grades.items()
+            }
+            row.update(grades_upper)
             flattened_data.append(row)
             
         df = pd.DataFrame(flattened_data)
