@@ -28,18 +28,14 @@ class WanisEngine:
 
     def get_recommendation(self, student_dict):
         try:
-            # 1. تجهيز البيانات
             clean_dict = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
             gpa_val = float(student_dict.get("GPA", 0.0))
             
             prefix_map = {
-                "Programming": ["CS", "SWE"], 
-                "AI": ["AI", "ML"], 
-                "IT": ["IT", "NET", "ENG"], 
-                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
+                "Programming": ["CS", "SWE"], "AI": ["AI", "ML"], 
+                "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]
             }
             
-            # 2. حساب بصمة الطالب (Track Vector)
             track_scores = []
             for t in self.track_names:
                 prefixes = prefix_map[t]
@@ -47,23 +43,17 @@ class WanisEngine:
                 track_scores.append(np.mean(vals) if vals else 0.0001)
             
             student_vec = np.array(track_scores).reshape(1, -1)
-            
-            # --- تحسين منطق اختيار التراك (Hybrid Logic) ---
             cluster_id = self.kmeans.predict(student_vec)[0]
             system_dominant = self.cluster_to_track.get(cluster_id, "General")
             
-            # إذا كان الطالب متفوقاً جداً في تراك معين (أعلى من 80)، نعتبره التراك الأساسي له
+            # كسر ديكتاتورية الموديل لو الطالب متفوق في تراك آخر
             max_idx = np.argmax(track_scores)
-            if track_scores[max_idx] > 80:
-                dominant_track = self.track_names[max_idx]
-            else:
-                dominant_track = system_dominant
+            dominant_track = self.track_names[max_idx] if track_scores[max_idx] > 80 else system_dominant
             
-            # حساب قوة التراك المختار للثقة
             track_idx = self.track_names.index(dominant_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
             
-            # 3. الحساب الهجين (Hybrid Scoring)
+            # الحساب الهجين
             w1, w2, w3 = self.weights
             content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
@@ -74,49 +64,45 @@ class WanisEngine:
             
             taken_courses = list(clean_dict.keys())
             
-            # 4. فلترة التخصص (Allowed Prefixes)
-            # تحسين: السماح بمواد من تراكات أخرى لو السكور عالي جداً (Cross-track recommendation)
-            track_allowed_prefix = {
-                "Programming": ["CS", "SWE"],
-                "AI": ["AI", "ML"],
-                "IT": ["IT", "NET", "ENG"],
-                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
-            }
-            allowed_prefixes = track_allowed_prefix.get(dominant_track, [])
-
+            # منطق الفلترة مع بونص التخصص
+            allowed_prefixes = prefix_map.get(dominant_track, [])
             recs = []
-            max_score = np.max(final_scores) if len(final_scores) > 0 else 1
+            
+            # كسر التعادل (Tie Breaker)
+            for i in range(len(final_scores)):
+                final_scores[i] += (i * 0.000001)
+
+            max_score_all = np.max(final_scores) if len(final_scores) > 0 else 1
 
             for i in range(len(self.course_codes)):
-                course_code = self.course_codes[i]
-                if course_code in taken_courses: continue
+                code = self.course_codes[i]
+                if code in taken_courses: continue
                 
                 score = float(final_scores[i])
+                is_in_track = any(code.startswith(p) for p in allowed_prefixes)
+                if is_in_track: score *= 1.2 
                 
-                # إضافة Bonus للمواد التي تنتمي لتراك الطالب المختار
-                is_in_track = any(course_code.startswith(p) for p in allowed_prefixes)
-                if is_in_track:
-                    score *= 1.2 # زيادة 20% للمواد التي في تخصصه
-                
-                confidence_val = round((score / (max_score * 1.2)) * 100, 1)
-                
+                confidence_val = round((score / (max_score_all * 1.2)) * 100, 1)
                 recs.append({
-                    "course_code": course_code,
-                    "course_name": self.course_names[i],
-                    "score": round(score, 4),
-                    "confidence": f"{min(confidence_val, 100.0)}%"
+                    "course_code": code, "course_name": self.course_names[i],
+                    "score": round(score, 4), "confidence": f"{min(confidence_val, 100.0)}%",
+                    "is_in_track": is_in_track
                 })
 
-            # 5. الرد النهائي المرتب
+            # منطق الـ Fallback لضمان عدم ظهور قائمة فارغة
+            sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
+            final_output = [r for r in sorted_recs if r["is_in_track"]][:3]
+            if len(final_output) < 2:
+                final_output = sorted_recs[:3]
+
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{round(track_conf_raw, 1)}%",
                 "track_reasoning": f"Based on your profile, you show high alignment with {dominant_track}.",
-                "recommendations": sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
+                "recommendations": final_output
             }
-
         except Exception as e:
-            logger.error(f"Recommendation generation error: {e}")
+            logger.error(f"Error: {e}")
             return {"error": str(e)}
 
     def retrain_model(self, data_url):
