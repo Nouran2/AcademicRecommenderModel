@@ -7,7 +7,7 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 
 def build_dynamic_courses(catalog_data):
-    # نظام البصمات الحادة لضمان عدم تداخل التخصصات
+    # نظام البصمات الحادة (Polarized) لضمان تمايز التخصصات
     category_map = {
         "Artificial Intelligence": [0.0, 1.0, 0.0, 0.0],
         "Information Technology":  [0.0, 0.0, 1.0, 0.0],
@@ -42,7 +42,6 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             dump_resp = client.get(data_url, headers=headers)
             dump_resp.raise_for_status()
             raw_students = dump_resp.json().get("data", [])
-            
             cat_resp = client.get(catalog_url, headers=headers)
             catalog_data = cat_resp.json().get("data", [])
 
@@ -54,13 +53,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             flattened_data.append(row)
         
         df = pd.DataFrame(flattened_data).fillna(0)
-        
-        prefix_map = {
-            "Programming": ["CS", "SWE"],
-            "AI": ["AI", "ML"],
-            "IT": ["IT", "NET", "ENG"],
-            "IS": ["IS", "BUS", "HUM", "ART", "MED"]
-        }
+        prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
         
         track_df = pd.DataFrame(index=df.index)
         for track, prefixes in prefix_map.items():
