@@ -9,19 +9,20 @@ from sklearn.neighbors import NearestNeighbors
 def build_dynamic_courses(catalog_data):
     # خريطة التصنيف بناءً على Category الجامعة
     category_map = {
-        "Artificial Intelligence": [0.1, 0.9, 0.1, 0.1],
-        "Information Technology": [0.1, 0.1, 0.9, 0.1],
-        "Information Systems": [0.1, 0.1, 0.1, 0.9],
-        "Software Engineering": [0.9, 0.1, 0.1, 0.1],
-        "Computer Science & IT": [0.8, 0.1, 0.3, 0.1],
-        "Business Administration": [0.1, 0.1, 0.1, 0.8]
+        "Artificial Intelligence": [0.0, 1.0, 0.0, 0.0], # AI صريح
+        "Information Technology":  [0.0, 0.0, 1.0, 0.0], # IT صريح
+        "Information Systems":     [0.0, 0.0, 0.0, 1.0], # IS صريح
+        "Software Engineering":    [1.0, 0.0, 0.0, 0.0], # Programming صريح
+        "Computer Science & IT":   [0.7, 0.0, 0.3, 0.0], # خليط محدد
+        "Business Administration": [0.0, 0.0, 0.0, 1.0], # يروح للـ IS
+        "Engineering":             [0.2, 0.2, 0.3, 0.3]  # مادة عامة (تتوزع بالتساوي)
     }
     course_codes, course_names, course_vectors = [], [], []
     for course in catalog_data:
         code = course.get("code", "").upper()
         title = course.get("title", "Unknown Course")
         category = course.get("category", "")
-        vector = category_map.get(category, [0.25, 0.25, 0.25, 0.25])
+        vector = category_map.get(category, [0.05, 0.05, 0.05, 0.05])
         course_codes.append(code); course_names.append(title); course_vectors.append(vector)
     return np.array(course_vectors), course_codes, course_names
 
