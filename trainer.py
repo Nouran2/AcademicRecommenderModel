@@ -1,3 +1,4 @@
+#الترينر 
 import pandas as pd
 import numpy as np
 import joblib
@@ -7,16 +8,18 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 
 def build_dynamic_courses(catalog_data):
-    # نظام البصمات الحادة (Polarized) لضمان تمايز التخصصات
+    # نظام البصمات الحادة (Polarized) لمنع تساوي السكور
     category_map = {
-        "Artificial Intelligence": [0.0, 1.0, 0.0, 0.0],
-        "Information Technology":  [0.0, 0.0, 1.0, 0.0],
-        "Information Systems":     [0.0, 0.0, 0.0, 1.0],
-        "Software Engineering":    [1.0, 0.0, 0.0, 0.0],
-        "Business Administration": [0.01, 0.01, 0.01, 0.9],
-        "Faculty of Medicine":     [0.01, 0.4, 0.01, 0.2],
-        "Faculty of Arts":         [0.1, 0.01, 0.01, 0.4],
-        "Engineering":             [0.2, 0.1, 0.5, 0.1]
+        "Artificial Intelligence": [0.0, 1.0, 0.0, 0.0], # AI صريح
+        "Information Technology":  [0.0, 0.0, 1.0, 0.0], # IT صريح
+        "Information Systems":     [0.0, 0.0, 0.0, 1.0], # IS صريح
+        "Software Engineering":    [1.0, 0.0, 0.0, 0.0], # Prog صريح
+        
+        # كليات خارجية بأوزان "فريدة" ومائلة لتراكاتنا
+        "Business Administration": [0.01, 0.01, 0.01, 0.9], # مائل بقوة للـ IS (نظم معلومات إدارية)
+        "Faculty of Medicine":     [0.01, 0.4, 0.01, 0.2],  # مائل للـ AI (عشان الـ Bioinformatics)
+        "Faculty of Arts":         [0.1, 0.01, 0.01, 0.4],  # مائل للـ IS و Programming (عشان الـ UI/UX)
+        "Engineering":             [0.2, 0.1, 0.5, 0.1]     # مائل للـ IT (عشان الدوائر والشبكات)
     }
     
     course_codes, course_names, course_vectors = [], [], []
@@ -33,6 +36,7 @@ def build_dynamic_courses(catalog_data):
     return np.array(course_vectors), course_codes, course_names
 
 def perform_training(data_url, model_path="wanees_model.pkl"):
+    """الدالة التي يبحث عنها المين (لا تغيري اسمها)"""
     api_key = os.getenv("AI_API_KEY")
     catalog_url = "https://rafeek-live.runasp.net/v1/api/ai/course/catalog"
     headers = {"X-AI-API-KEY": api_key}
@@ -42,6 +46,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             dump_resp = client.get(data_url, headers=headers)
             dump_resp.raise_for_status()
             raw_students = dump_resp.json().get("data", [])
+            
             cat_resp = client.get(catalog_url, headers=headers)
             catalog_data = cat_resp.json().get("data", [])
 
@@ -53,7 +58,13 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             flattened_data.append(row)
         
         df = pd.DataFrame(flattened_data).fillna(0)
-        prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
+        
+        prefix_map = {
+            "Programming": ["CS", "SWE"],
+            "AI": ["AI", "ML"],
+            "IT": ["IT", "NET", "ENG"],
+            "IS": ["IS", "BUS", "HUM", "ART", "MED"]
+        }
         
         track_df = pd.DataFrame(index=df.index)
         for track, prefixes in prefix_map.items():
@@ -66,14 +77,13 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
         
         c_vectors, c_codes, c_names = build_dynamic_courses(catalog_data)
         track_names = ["Programming", "AI", "IT", "IS"]
-        cluster_to_track = {i: track_names[np.argmax(kmeans.cluster_centers_[i])] for i in range(4)}
-
+        
         artifacts = {
             "kmeans": kmeans, "nn_model": nn_model, "student_vectors": student_vectors,
             "track_names": track_names, "course_vectors": c_vectors,
             "course_codes": c_codes, "course_names": c_names,
-            "cluster_to_track": cluster_to_track,
-            "optimal_weights": (0.6, 0.3, 0.1) 
+            "cluster_to_track": {i: track_names[np.argmax(kmeans.cluster_centers_[i])] for i in range(4)},
+            "optimal_weights": (0.5, 0.3, 0.2)
         }
         joblib.dump(artifacts, model_path)
         return True
