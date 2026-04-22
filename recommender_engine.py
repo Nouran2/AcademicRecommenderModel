@@ -64,7 +64,10 @@ class WanisEngine:
             
             taken_courses = [k for k in clean_dict if k != "GPA"]
             
-            # 4. فلترة التخصص (Allowed Prefixes)
+            # --- 🚀 التعديل الجوهري: "منطق عدم اليقين" (Uncertainty Logic) ---
+            # لو الموديل مش متأكد (أقل من 45%)، بنلغي الفلترة الصارمة عشان م نظلمش الطالب
+            is_unsure = track_conf_raw < 45.0
+            
             track_allowed_prefix = {
                 "Programming": ["CS", "SWE"],
                 "AI": ["AI", "ML"],
@@ -76,12 +79,14 @@ class WanisEngine:
             recs = []
             max_score = np.max(final_scores) if len(final_scores) > 0 else 1
 
-            # الحلقة الأولى: الفلترة الصارمة حسب التراك
+            # 4. بناء الترشيحات
             for i in range(len(self.course_codes)):
                 course_code = self.course_codes[i]
 
-                if not any(course_code.startswith(p) for p in allowed_prefixes):
-                    continue
+                # لو الموديل "متأكد" بنطبق الفلترة. لو "شاكك" بنفتح المجال لكل المواد
+                if not is_unsure:
+                    if not any(course_code.startswith(p) for p in allowed_prefixes):
+                        continue
                 
                 if course_code in taken_courses:
                     continue
@@ -96,16 +101,14 @@ class WanisEngine:
                     "confidence": f"{confidence_val}%"
                 })
 
-            # 5. منطق الـ Fallback: لو ملقاش مواد كفاية في تراك الطالب
-            if len(recs) < 2:
+            # 5. منطق الـ Fallback المطور
+            if len(recs) < 3:
                 for i in range(len(self.course_codes)):
                     code = self.course_codes[i]
-                    # تخطي لو المادة أخدها أو موجودة فعلاً في الترشيحات
                     if code in taken_courses or any(r["course_code"] == code for r in recs):
                         continue
                     
                     score = float(final_scores[i])
-                    # استخدام max_score الموحد لمنع الـ Error
                     confidence_val = round((score / max_score) * 100, 1)
                     
                     recs.append({
@@ -115,12 +118,19 @@ class WanisEngine:
                         "confidence": f"{confidence_val}%"
                     })
             
-            # 6. الرد النهائي المرتب
+            # ترتيب النتائج بناءً على السكور (اللي بيعتمد على تشابه المواد مع درجات الطالب الفعلية)
+            sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
+
+            # 6. الرد النهائي مع تبرير ذكي
+            reasoning = f"Based on your profile, you show alignment with {dominant_track}."
+            if is_unsure:
+                reasoning = "Your diverse academic performance suggests a multi-disciplinary path. We've broadened our search across all tracks."
+
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{round(track_conf_raw, 1)}%",
-                "track_reasoning": f"Based on your profile, you show high alignment with {dominant_track}.",
-                "recommendations": sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
+                "track_reasoning": reasoning,
+                "recommendations": sorted_recs
             }
 
         except Exception as e:
