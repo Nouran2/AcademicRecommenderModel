@@ -1,83 +1,106 @@
-import joblib
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
+import os
+import logging
+import httpx
+import asyncio
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+from typing import List, Dict, Optional
+from pydantic import BaseModel
+from cachetools import TTLCache
+from recommender_engine import WanisEngine
+from trainer import perform_training
 
-class WanisEngine:
-    def __init__(self, model_path):
-        self.model_path = model_path
-        self._load_artifacts()
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger("wanees")
+app = FastAPI(title="Wanees Final Professional API")
 
-    def _load_artifacts(self):
-        self.artifacts = joblib.load(self.model_path)
-        self.kmeans = self.artifacts["kmeans"]
-        self.nn_model = self.artifacts["nn_model"]
-        self.student_vectors = self.artifacts["student_vectors"]
-        self.course_vectors = self.artifacts["course_vectors"]
-        self.course_codes = self.artifacts["course_codes"]
-        self.course_names = self.artifacts["course_names"]
-        self.track_names = self.artifacts["track_names"]
-        self.cluster_to_track = self.artifacts["cluster_to_track"]
-        self.weights = self.artifacts["optimal_weights"]
+class CourseRec(BaseModel):
+    course_code: str
+    course_name: str
+    confidence: str
+    score: float 
 
-    def get_recommendation(self, student_dict):
+class RecResponse(BaseModel):
+    status: str
+    source: str
+    dominant_track: str
+    track_confidence: str
+    track_reasoning: str
+    recommendations: List[CourseRec]
+
+BASE_URL = "https://rafeek-live.runasp.net"
+AI_API_KEY = os.getenv("AI_API_KEY")
+ADMIN_KEY = os.getenv("ADMIN_KEY")
+MODEL_PATH = "wanees_model.pkl"
+
+ANALYTICS_DUMP_URL = f"{BASE_URL}/v1/api/ai/analytics/dump"
+STUDENT_GRADES_URL = BASE_URL + "/v1/api/ai/student/{student_id}/grades"
+COURSE_CATALOG_URL = BASE_URL + "/v1/api/ai/course/catalog"
+
+student_cache = TTLCache(maxsize=1000, ttl=600)
+custom_timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+
+engine: Optional[WanisEngine] = None
+http_client = httpx.AsyncClient(timeout=custom_timeout)
+engine_lock = asyncio.Lock()
+retrain_lock = asyncio.Lock()
+
+@app.on_event("startup")
+async def startup_event():
+    global engine
+    # 🔥 تدريب أوتوماتيكي لو الموديل مش موجود (بيحل مشكلة الـ 503)
+    if not os.path.exists(MODEL_PATH):
+        logger.info("⚠️ الموديل مفقود، جاري التدريب التلقائي...")
+        success = perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
+        if success: logger.info("✅ تم التدريب التلقائي بنجاح.")
+
+    try:
+        if os.path.exists(MODEL_PATH):
+            engine = WanisEngine(MODEL_PATH)
+            logger.info("✅ ونيس والموديل جاهزين للعمل.")
+    except Exception as e:
+        logger.error(f"⚠️ فشل تحميل الموديل: {e}")
+        engine = None
+
+@app.get("/health")
+def health(): return {"status": "active", "model_loaded": engine is not None}
+
+@app.get("/recommend/{student_id}", response_model=RecResponse)
+async def recommend(student_id: str):
+    if engine is None: raise HTTPException(status_code=503, detail="الموديل قيد التحضير...")
+    clean_id = student_id.strip()
+    
+    if clean_id in student_cache:
+        async with engine_lock: return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
+
+    for attempt in range(3):
         try:
-            clean_dict = {k.upper(): v for k, v in student_dict.items()}
-            prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
-            
-            track_scores = []
-            for t in self.track_names:
-                prefixes = prefix_map[t]
-                vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
-                track_scores.append(np.mean(vals) if vals else 0.0001)
-            
-            student_vec = np.array(track_scores).reshape(1, -1)
-            cluster_id = self.kmeans.predict(student_vec)[0]
-            dominant_track = self.cluster_to_track.get(cluster_id, "General")
-            
-            track_idx = self.track_names.index(dominant_track)
-            track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
-            
-            w1, w2, w3 = self.weights
-            content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
-            neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
-            collab_sims = cosine_similarity(self.student_vectors[neighbors].mean(axis=0).reshape(1, -1), self.course_vectors)[0]
-            
-            gpa_val = float(student_dict.get("GPA", 0.0))
-            trend_boost = 0.15 if gpa_val >= 3.5 else 0.10
-            final_scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend_boost)
-            
-            taken_courses = [k for k in clean_dict if k != "GPA"]
-            
-            # --- فلترة حسب التراك (إصلاح 1) ---
-            track_allowed_prefix = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
-            allowed_prefixes = track_allowed_prefix.get(dominant_track, [])
+            url = STUDENT_GRADES_URL.format(student_id=clean_id)
+            resp = await http_client.get(url, headers={"X-AI-API-KEY": AI_API_KEY})
+            if resp.status_code == 200:
+                data = resp.json().get("data", {})
+                grades = data.get("courseGrades", {})
+                student_info = {"GPA": float(data.get("gpa", 0.0)), **{k.upper(): v for k, v in grades.items()}}
+                student_cache[clean_id] = student_info
+                async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+            elif resp.status_code in [400, 404]:
+                # Cold Start لو الطالب مش موجود
+                cat_resp = await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})
+                cat = cat_resp.json().get("data", [])[:3]
+                recs = [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "95%", "score": 1.0} for c in cat]
+                return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "100%", "track_reasoning": "Welcome!", "recommendations": recs}
+            await asyncio.sleep(1)
+        except Exception as e:
+            logger.error(f"Attempt {attempt + 1} failed: {e}"); await asyncio.sleep(1)
+    raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب.")
 
-            recs = []
-            max_final = np.max(final_scores) if len(final_scores) > 0 else 1
-
-            for i in range(len(self.course_codes)):
-                code = self.course_codes[i]
-                if not any(code.startswith(p) for p in allowed_prefixes): continue
-                if code in taken_courses: continue
-                
-                score = float(final_scores[i])
-                # --- Confidence نسبي (إصلاح 2) ---
-                confidence_val = round((score / max_final) * 100, 1)
-                
-                recs.append({
-                    "course_code": code, "course_name": self.course_names[i],
-                    "score": round(score, 4), "confidence": f"{confidence_val}%"
-                })
-            
-            return {
-                "dominant_track": dominant_track,
-                "track_confidence": f"{round(track_conf_raw, 1)}%",
-                "track_reasoning": f"Based on your profile, you show high alignment with {dominant_track}.",
-                "recommendations": sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
-            }
-        except Exception as e: return {"error": str(e)}
-
-    def retrain_model(self, data_url):
-        from trainer import perform_training
-        if perform_training(data_url, self.model_path): self._load_artifacts(); return True
-        return False
+@app.post("/retrain")
+async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(...)):
+    if x_admin_key != ADMIN_KEY: raise HTTPException(status_code=403)
+    async def retrain_safe():
+        global engine
+        async with retrain_lock:
+            loop = asyncio.get_running_loop()
+            success = await loop.run_in_executor(None, perform_training, ANALYTICS_DUMP_URL, MODEL_PATH)
+            if success: engine = WanisEngine(MODEL_PATH); student_cache.clear()
+    background_tasks.add_task(retrain_safe)
+    return {"message": "بدأت عملية إعادة التدريب في الخلفية."}
