@@ -63,6 +63,7 @@ class WanisEngine:
                 recs.append({
                     "course_code": code,
                     "course_name": self.course_names[i],
+                    "score": round(raw_score, 4),
                     "confidence": f"{round(min(raw_score * 100 + 40, 98.5), 1)}%"
                 })
             
