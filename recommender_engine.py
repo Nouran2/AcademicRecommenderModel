@@ -23,21 +23,17 @@ class WanisEngine:
             self.cluster_to_track = self.artifacts["cluster_to_track"]
             self.weights = self.artifacts["optimal_weights"]
         except Exception as e:
-            logger.error(f"Error loading artifacts: {e}")
-            raise RuntimeError("Artifacts missing. Please Retrain.")
+            logger.error(f"Error: {e}")
+            raise RuntimeError("Artifacts missing.")
 
     def get_recommendation(self, student_dict):
         try:
-            # 1. تجهيز البيانات
             clean_dict = {k.upper(): v for k, v in student_dict.items()}
             prefix_map = {
-                "Programming": ["CS", "SWE"], 
-                "AI": ["AI", "ML"], 
-                "IT": ["IT", "NET", "ENG"], 
-                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
+                "Programming": ["CS", "SWE"], "AI": ["AI", "ML"], 
+                "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]
             }
             
-            # 2. حساب بصمة الطالب (Track Vector)
             track_scores = []
             for t in self.track_names:
                 prefixes = prefix_map[t]
@@ -46,13 +42,13 @@ class WanisEngine:
             
             student_vec = np.array(track_scores).reshape(1, -1)
             cluster_id = self.kmeans.predict(student_vec)[0]
-            dominant_track = self.cluster_to_track.get(cluster_id, "General")
+            initial_track = self.cluster_to_track.get(cluster_id, "General")
             
-            # حساب قوة التراك المهيمن
-            track_idx = self.track_names.index(dominant_track)
+            # حساب الثقة
+            track_idx = self.track_names.index(initial_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
             
-            # 3. الحساب الهجين (Hybrid Scoring)
+            # الحساب الهجين
             w1, w2, w3 = self.weights
             content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
@@ -60,81 +56,63 @@ class WanisEngine:
             
             gpa_val = float(student_dict.get("GPA", 0.0))
             trend_boost = 0.15 if gpa_val >= 3.5 else 0.10
+            
             final_scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend_boost)
             
             taken_courses = [k for k in clean_dict if k != "GPA"]
-            
-            # --- 🚀 التعديل الجوهري: "منطق عدم اليقين" (Uncertainty Logic) ---
-            # لو الموديل مش متأكد (أقل من 45%)، بنلغي الفلترة الصارمة عشان م نظلمش الطالب
-            is_unsure = track_conf_raw < 45.0
-            
-            track_allowed_prefix = {
-                "Programming": ["CS", "SWE"],
-                "AI": ["AI", "ML"],
-                "IT": ["IT", "NET", "ENG"],
-                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
-            }
-            allowed_prefixes = track_allowed_prefix.get(dominant_track, [])
-
             recs = []
-            max_score = np.max(final_scores) if len(final_scores) > 0 else 1
-
-            # 4. بناء الترشيحات
+            
+            # --- 🛠️ الإصلاح الجوهري ---
             for i in range(len(self.course_codes)):
-                course_code = self.course_codes[i]
-
-                # لو الموديل "متأكد" بنطبق الفلترة. لو "شاكك" بنفتح المجال لكل المواد
-                if not is_unsure:
-                    if not any(course_code.startswith(p) for p in allowed_prefixes):
-                        continue
-                
-                if course_code in taken_courses:
-                    continue
+                code = self.course_codes[i]
+                if code in taken_courses: continue
                 
                 score = float(final_scores[i])
-                confidence_val = round((score / max_score) * 100, 1)
                 
+                # إعطاء بونص (20%) للمواد اللي من تخصص الطالب الأساسي لضمان "الهوية"
+                is_in_track = any(code.startswith(p) for p in prefix_map.get(initial_track, []))
+                if is_in_track:
+                    score *= 1.2
+                
+                # كسر التعادل (Tie Breaker) بناءً على ترتيب المادة (عشان ميبقاش السكور متطابق)
+                score += (i * 0.00001)
+
                 recs.append({
-                    "course_code": course_code,
-                    "course_name": self.course_names[i],
-                    "score": round(score, 4),
-                    "confidence": f"{confidence_val}%"
+                    "course_code": code, 
+                    "course_name": self.course_names[i], 
+                    "score": score,
+                    "is_in_track": is_in_track
                 })
 
-            # 5. منطق الـ Fallback المطور
-            if len(recs) < 3:
-                for i in range(len(self.course_codes)):
-                    code = self.course_codes[i]
-                    if code in taken_courses or any(r["course_code"] == code for r in recs):
-                        continue
-                    
-                    score = float(final_scores[i])
-                    confidence_val = round((score / max_score) * 100, 1)
-                    
-                    recs.append({
-                        "course_code": code, 
-                        "course_name": self.course_names[i], 
-                        "score": round(score, 4), 
-                        "confidence": f"{confidence_val}%"
-                    })
+            # ترتيب واختيار أفضل 3
+            final_recs = sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
             
-            # ترتيب النتائج بناءً على السكور (اللي بيعتمد على تشابه المواد مع درجات الطالب الفعلية)
-            sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
+            # إذا كانت أغلب التوصيات خارج التراك الأساسي، نعدل اسم التراك ليكون "Multi-disciplinary"
+            actual_track = initial_track
+            in_track_count = sum(1 for r in final_recs if r["is_in_track"])
+            if in_track_count == 0 and track_conf_raw < 40:
+                actual_track = "Multi-disciplinary"
 
-            # 6. الرد النهائي مع تبرير ذكي
-            reasoning = f"Based on your profile, you show alignment with {dominant_track}."
-            if is_unsure:
-                reasoning = "Your diverse academic performance suggests a multi-disciplinary path. We've broadened our search across all tracks."
+            max_s = max([r["score"] for r in final_recs]) if final_recs else 1
+            
+            formatted_recs = []
+            for r in final_recs:
+                conf = round((r["score"] / max_s) * 100, 1)
+                formatted_recs.append({
+                    "course_code": r["course_code"],
+                    "course_name": r["course_name"],
+                    "confidence": f"{conf}%",
+                    "score": round(r["score"], 4)
+                })
 
             return {
-                "dominant_track": dominant_track,
+                "dominant_track": actual_track,
                 "track_confidence": f"{round(track_conf_raw, 1)}%",
-                "track_reasoning": reasoning,
-                "recommendations": sorted_recs
+                "track_reasoning": f"Analysis indicates a primary interest in {actual_track} based on academic history.",
+                "recommendations": formatted_recs
             }
 
         except Exception as e:
-            logger.error(f"Recommendation generation error: {e}")
             return {"error": str(e)}
 
     def retrain_model(self, data_url):
