@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
 from typing import List, Dict, Optional
 from pydantic import BaseModel
 from cachetools import TTLCache
-from recommender_engine import WanisEngine
+from recommender import WanisEngine # تم تعديل اسم الملف ليتوافق مع الملف الجديد
 from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -47,7 +47,7 @@ retrain_lock = asyncio.Lock()
 @app.on_event("startup")
 async def startup_event():
     global engine
-    # 🔥 تدريب أوتوماتيكي لو الموديل مش موجود (بيحل مشكلة الـ 503)
+    # 🔥 تدريب أوتوماتيكي لو الموديل مش موجود
     if not os.path.exists(MODEL_PATH):
         logger.info("⚠️ الموديل مفقود، جاري التدريب التلقائي...")
         success = perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
@@ -70,7 +70,8 @@ async def recommend(student_id: str):
     clean_id = student_id.strip()
     
     if clean_id in student_cache:
-        async with engine_lock: return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
+        async with engine_lock: 
+            return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
     for attempt in range(3):
         try:
@@ -79,18 +80,29 @@ async def recommend(student_id: str):
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 grades = data.get("courseGrades", {})
-                student_info = {"GPA": float(data.get("gpa", 0.0)), **{k.upper(): v for k, v in grades.items()}}
+                
+                # --- تحسين: التعامل مع الكابتل والسمول ---
+                # نقوم بتحويل جميع مفاتيح المواد إلى UPPERCASE لضمان التوافق مع الـ Recommender
+                # مع الحفاظ على الـ GPA كما هو
+                student_info = {"GPA": float(data.get("gpa", 0.0))}
+                for k, v in grades.items():
+                    student_info[k.upper()] = v
+                
                 student_cache[clean_id] = student_info
-                async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+                async with engine_lock: 
+                    return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+            
             elif resp.status_code in [400, 404]:
                 # Cold Start لو الطالب مش موجود
                 cat_resp = await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})
                 cat = cat_resp.json().get("data", [])[:3]
                 recs = [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "95%", "score": 1.0} for c in cat]
                 return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "100%", "track_reasoning": "Welcome!", "recommendations": recs}
+            
             await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"Attempt {attempt + 1} failed: {e}"); await asyncio.sleep(1)
+    
     raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب.")
 
 @app.post("/retrain")
@@ -101,6 +113,8 @@ async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(.
         async with retrain_lock:
             loop = asyncio.get_running_loop()
             success = await loop.run_in_executor(None, perform_training, ANALYTICS_DUMP_URL, MODEL_PATH)
-            if success: engine = WanisEngine(MODEL_PATH); student_cache.clear()
+            if success: 
+                engine = WanisEngine(MODEL_PATH)
+                student_cache.clear()
     background_tasks.add_task(retrain_safe)
     return {"message": "بدأت عملية إعادة التدريب في الخلفية."}
