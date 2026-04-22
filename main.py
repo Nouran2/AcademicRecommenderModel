@@ -9,16 +9,17 @@ from cachetools import TTLCache
 from recommender_engine import WanisEngine
 from trainer import perform_training
 
-# --- إعدادات الـ Logging والـ FastAPI ---
+# --- 1. إعدادات الـ Logging والـ FastAPI ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Professional API", version="2.5.0")
+app = FastAPI(title="Wanees Professional API", version="2.7.0")
 
-# --- Pydantic Models للتوثيق الاحترافي ---
+# --- 2. Pydantic Models (للتوثيق وظهور الـ Score) ---
 class CourseRec(BaseModel):
     course_code: str
     course_name: str
     confidence: str
+    score: float # يظهر كأرقام عشرية دقيقة
 
 class RecResponse(BaseModel):
     status: str
@@ -28,32 +29,75 @@ class RecResponse(BaseModel):
     track_reasoning: str
     recommendations: List[CourseRec]
 
-# --- الإعدادات ---
+# --- 3. الإعدادات والروابط (ثابتة تماماً) ---
 BASE_URL = "https://rafeek-live.runasp.net"
 AI_API_KEY = os.getenv("AI_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 MODEL_PATH = "wanees_model.pkl"
 
+# روابط الـ API الخاصة بجامعة المنصورة
+STUDENT_GRADES_URL = BASE_URL + "/v1/api/ai/student/{student_id}/grades"
+COURSE_CATALOG_URL = BASE_URL + "/v1/api/ai/course/catalog"
+ANALYTICS_DUMP_URL = BASE_URL + "/v1/api/ai/analytics/dump"
+
+# إعدادات الذاكرة المؤقتة والوقت
 student_cache = TTLCache(maxsize=1000, ttl=600)
+custom_timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
+
 engine: Optional[WanisEngine] = None
-http_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
+http_client = httpx.AsyncClient(timeout=custom_timeout)
 engine_lock = asyncio.Lock()
 retrain_lock = asyncio.Lock()
 
+# --- 4. أحداث البداية والنهاية ---
 @app.on_event("startup")
 async def startup_event():
     global engine
     try:
         engine = WanisEngine(MODEL_PATH)
-        logger.info("✅ ونيس والموديل جاهزين للعمل.")
+        logger.info(" ونيس والموديل جاهزين للعمل.")
     except:
-        logger.warning("⚠️ الموديل غير موجود، السيرفر يعمل بوضع الانتظار.")
+        logger.warning(" الموديل غير موجود، السيرفر يعمل بوضع الانتظار.")
         engine = None
 
 @app.get("/health")
 def health():
     return {"status": "active", "model_loaded": engine is not None}
 
+# --- 5. منطق الـ Cold Start (للطلاب الجدد أو غير الموجودين) ---
+async def get_cold_start(student_id: str):
+    try:
+        resp = await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})
+        if resp.status_code == 200:
+            full_json = resp.json()
+            catalog_list = full_json.get("data", [])
+            # ترشيح أول 3 مواد من الكتالوج العام بـ Score افتراضي
+            recs = [
+                {
+                    "course_code": c.get("code", "N/A"),
+                    "course_name": c.get("title", "Intro Course"),
+                    "confidence": "95.0%",
+                    "score": 1.0
+                } for c in catalog_list[:3]
+            ]
+        else: recs = []
+    except Exception as e:
+        logger.error(f"Cold Start Error: {e}")
+        recs = []
+    
+    if not recs:
+        recs = [{"course_code": "CS101", "course_name": "General Computer Science", "confidence": "90.0%", "score": 1.0}]
+    
+    return {
+        "status": "cold_start",
+        "source": "university_catalog",
+        "dominant_track": "General Discovery",
+        "track_confidence": "100%",
+        "track_reasoning": "Welcome! Since you are a new student, we recommend these essential courses.",
+        "recommendations": recs
+    }
+
+# --- 6. نقطة التوصية الرئيسية ---
 @app.get("/recommend/{student_id}", response_model=RecResponse)
 async def recommend(student_id: str):
     if engine is None: 
@@ -64,9 +108,10 @@ async def recommend(student_id: str):
         async with engine_lock:
             return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
+    # محاولة جلب البيانات (3 محاولات)
     for attempt in range(3):
         try:
-            url = f"{BASE_URL}/v1/api/ai/student/{clean_id}/grades"
+            url = STUDENT_GRADES_URL.format(student_id=clean_id)
             resp = await http_client.get(url, headers={"X-AI-API-KEY": AI_API_KEY})
             
             if resp.status_code == 200:
@@ -83,25 +128,27 @@ async def recommend(student_id: str):
             await asyncio.sleep(1)
         except HTTPException as e: raise e
         except Exception as e:
-            logger.error(f"Attempt {attempt} failed: {e}")
+            logger.error(f"Attempt {attempt + 1} failed: {e}")
             await asyncio.sleep(1)
             
-    raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب.")
+    raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب حالياً.")
 
+# --- 7. نقطة إعادة التدريب (Retrain) ---
 @app.post("/retrain")
 async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(...)):
-    if x_admin_key != ADMIN_KEY: raise HTTPException(status_code=403)
+    if x_admin_key != ADMIN_KEY: 
+        raise HTTPException(status_code=403, detail="Unauthorized Admin Access")
     
     async def retrain_safe():
         global engine
         async with retrain_lock:
             loop = asyncio.get_running_loop()
-            # استدعاء مباشر لـ trainer لتخطي مشكلة الـ NoneType
-            success = await loop.run_in_executor(None, perform_training, f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH)
+            # استدعاء مباشر لـ trainer لتخطي مشكلة الـ NoneType الأولية
+            success = await loop.run_in_executor(None, perform_training, ANALYTICS_DUMP_URL, MODEL_PATH)
             if success:
                 engine = WanisEngine(MODEL_PATH)
                 student_cache.clear()
-                logger.info("✅ تم تحديث الموديل بنجاح.")
+                logger.info(" تم تحديث الموديل والمحرك بنجاح.")
 
     background_tasks.add_task(retrain_safe)
-    return {"message": "بدأ التدريب في الخلفية، راقب صفحة الـ Health."}
+    return {"message": "بدأت عملية إعادة التدريب في الخلفية، راقب صفحة الـ Health."}
