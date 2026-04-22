@@ -2,11 +2,11 @@ import os
 import logging
 import httpx
 import asyncio
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
-from typing import List, Optional
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Depends
+from typing import List, Dict, Optional
 from pydantic import BaseModel
 from cachetools import TTLCache
-from recommender import WanisEngine # تأكدي من تسمية الملف recommender.py
+from recommender_engine import WanisEngine
 from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -47,10 +47,11 @@ retrain_lock = asyncio.Lock()
 @app.on_event("startup")
 async def startup_event():
     global engine
+    # 🔥 تدريب أوتوماتيكي لو الموديل مش موجود (بيحل مشكلة الـ 503)
     if not os.path.exists(MODEL_PATH):
         logger.info("⚠️ الموديل مفقود، جاري التدريب التلقائي...")
-        # تدريب مباشر لحل مشكلة البداية
-        perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
+        success = perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
+        if success: logger.info("✅ تم التدريب التلقائي بنجاح.")
 
     try:
         if os.path.exists(MODEL_PATH):
@@ -65,12 +66,11 @@ def health(): return {"status": "active", "model_loaded": engine is not None}
 
 @app.get("/recommend/{student_id}", response_model=RecResponse)
 async def recommend(student_id: str):
-    if engine is None: raise HTTPException(status_code=503, detail="الموديل غير متاح.")
+    if engine is None: raise HTTPException(status_code=503, detail="الموديل قيد التحضير...")
     clean_id = student_id.strip()
     
     if clean_id in student_cache:
-        async with engine_lock: 
-            return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
+        async with engine_lock: return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
     for attempt in range(3):
         try:
@@ -81,17 +81,16 @@ async def recommend(student_id: str):
                 grades = data.get("courseGrades", {})
                 student_info = {"GPA": float(data.get("gpa", 0.0)), **{k.upper(): v for k, v in grades.items()}}
                 student_cache[clean_id] = student_info
-                async with engine_lock: 
-                    return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+                async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
             elif resp.status_code in [400, 404]:
+                # Cold Start لو الطالب مش موجود
                 cat_resp = await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})
                 cat = cat_resp.json().get("data", [])[:3]
                 recs = [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "95%", "score": 1.0} for c in cat]
                 return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "100%", "track_reasoning": "Welcome!", "recommendations": recs}
             await asyncio.sleep(1)
         except Exception as e:
-            logger.error(f"Error: {e}"); await asyncio.sleep(1)
-    
+            logger.error(f"Attempt {attempt + 1} failed: {e}"); await asyncio.sleep(1)
     raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب.")
 
 @app.post("/retrain")
@@ -101,8 +100,7 @@ async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(.
         global engine
         async with retrain_lock:
             loop = asyncio.get_running_loop()
-            if await loop.run_in_executor(None, perform_training, ANALYTICS_DUMP_URL, MODEL_PATH):
-                engine = WanisEngine(MODEL_PATH)
-                student_cache.clear()
+            success = await loop.run_in_executor(None, perform_training, ANALYTICS_DUMP_URL, MODEL_PATH)
+            if success: engine = WanisEngine(MODEL_PATH); student_cache.clear()
     background_tasks.add_task(retrain_safe)
-    return {"message": "بدأت عملية إعادة التدريب."}
+    return {"message": "بدأت عملية إعادة التدريب في الخلفية."}
