@@ -1,6 +1,9 @@
 import joblib
 import numpy as np
+import logging
 from sklearn.metrics.pairwise import cosine_similarity
+
+logger = logging.getLogger("wanees")
 
 class WanisEngine:
     def __init__(self, model_path):
@@ -19,13 +22,22 @@ class WanisEngine:
             self.track_names = self.artifacts["track_names"]
             self.cluster_to_track = self.artifacts["cluster_to_track"]
             self.weights = self.artifacts["optimal_weights"]
-        except: raise RuntimeError("Artifacts missing. Please Retrain.")
+        except Exception as e:
+            logger.error(f"Error loading artifacts: {e}")
+            raise RuntimeError("Artifacts missing. Please Retrain.")
 
     def get_recommendation(self, student_dict):
         try:
+            # 1. تجهيز البيانات
             clean_dict = {k.upper(): v for k, v in student_dict.items()}
-            prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
+            prefix_map = {
+                "Programming": ["CS", "SWE"], 
+                "AI": ["AI", "ML"], 
+                "IT": ["IT", "NET", "ENG"], 
+                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
+            }
             
+            # 2. حساب بصمة الطالب (Track Vector)
             track_scores = []
             for t in self.track_names:
                 prefixes = prefix_map[t]
@@ -36,10 +48,11 @@ class WanisEngine:
             cluster_id = self.kmeans.predict(student_vec)[0]
             dominant_track = self.cluster_to_track.get(cluster_id, "General")
             
-            # حساب قوة التراك الفعلي
+            # حساب قوة التراك المهيمن
             track_idx = self.track_names.index(dominant_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
             
+            # 3. الحساب الهجين (Hybrid Scoring)
             w1, w2, w3 = self.weights
             content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
@@ -51,7 +64,7 @@ class WanisEngine:
             
             taken_courses = [k for k in clean_dict if k != "GPA"]
             
-            # --- الإصلاح رقم 1: تحديد البادئات المسموحة حسب التراك المهيمن ---
+            # 4. فلترة التخصص (Allowed Prefixes)
             track_allowed_prefix = {
                 "Programming": ["CS", "SWE"],
                 "AI": ["AI", "ML"],
@@ -63,21 +76,17 @@ class WanisEngine:
             recs = []
             max_score = np.max(final_scores) if len(final_scores) > 0 else 1
 
+            # الحلقة الأولى: الفلترة الصارمة حسب التراك
             for i in range(len(self.course_codes)):
                 course_code = self.course_codes[i]
 
-                # فلترة حسب التخصص (الإصلاح رقم 1)
                 if not any(course_code.startswith(p) for p in allowed_prefixes):
                     continue
-               
-                # منع تكرار المواد المأخوذة
+                
                 if course_code in taken_courses:
                     continue
                 
                 score = float(final_scores[i])
-                
-                # --- الإصلاح رقم 2: حساب الـ Confidence النسبي ---
-                # $$ \text{confidence\_val} = \frac{\text{score}}{\max(\text{final\_scores})} \times 100 $$
                 confidence_val = round((score / max_score) * 100, 1)
                 
                 recs.append({
@@ -86,20 +95,41 @@ class WanisEngine:
                     "score": round(score, 4),
                     "confidence": f"{confidence_val}%"
                 })
-           if len(recs) < 2:
+
+            # 5. منطق الـ Fallback: لو ملقاش مواد كفاية في تراك الطالب
+            if len(recs) < 2:
                 for i in range(len(self.course_codes)):
                     code = self.course_codes[i]
-                    if code in taken_courses or any(r["course_code"] == code for r in recs): continue
+                    # تخطي لو المادة أخدها أو موجودة فعلاً في الترشيحات
+                    if code in taken_courses or any(r["course_code"] == code for r in recs):
+                        continue
                     
                     score = float(final_scores[i])
-                    confidence_val = round((score / max_final) * 100, 1)
-                    recs.append({"course_code": code, "course_name": self.course_names[i], "score": score, "confidence": f"{confidence_val}%"})    
+                    # استخدام max_score الموحد لمنع الـ Error
+                    confidence_val = round((score / max_score) * 100, 1)
+                    
+                    recs.append({
+                        "course_code": code, 
+                        "course_name": self.course_names[i], 
+                        "score": round(score, 4), 
+                        "confidence": f"{confidence_val}%"
+                    })
             
+            # 6. الرد النهائي المرتب
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{round(track_conf_raw, 1)}%",
                 "track_reasoning": f"Based on your profile, you show high alignment with {dominant_track}.",
                 "recommendations": sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
             }
+
         except Exception as e:
+            logger.error(f"Recommendation generation error: {e}")
             return {"error": str(e)}
+
+    def retrain_model(self, data_url):
+        from trainer import perform_training
+        if perform_training(data_url, self.model_path):
+            self._load_artifacts()
+            return True
+        return False
