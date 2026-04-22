@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from typing import List, Optional
 from pydantic import BaseModel
 from cachetools import TTLCache
-from recommender import WanisEngine
+from recommender import WanisEngine # تأكدي من تسمية الملف recommender.py
 from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -49,6 +49,7 @@ async def startup_event():
     global engine
     if not os.path.exists(MODEL_PATH):
         logger.info("⚠️ الموديل مفقود، جاري التدريب التلقائي...")
+        # تدريب مباشر لحل مشكلة البداية
         perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
 
     try:
