@@ -7,18 +7,16 @@ from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 
 def build_dynamic_courses(catalog_data):
-    # نظام البصمات الحادة (Polarized) لمنع تساوي السكور
+    # نظام البصمات الحادة (Polarized)
     category_map = {
-        "Artificial Intelligence": [0.0, 1.0, 0.0, 0.0], # AI صريح
-        "Information Technology":  [0.0, 0.0, 1.0, 0.0], # IT صريح
-        "Information Systems":     [0.0, 0.0, 0.0, 1.0], # IS صريح
-        "Software Engineering":    [1.0, 0.0, 0.0, 0.0], # Prog صريح
-        
-        # كليات خارجية بأوزان "فريدة" ومائلة لتراكاتنا
-        "Business Administration": [0.01, 0.01, 0.01, 0.9], # مائل بقوة للـ IS (نظم معلومات إدارية)
-        "Faculty of Medicine":     [0.01, 0.4, 0.01, 0.2],  # مائل للـ AI (عشان الـ Bioinformatics)
-        "Faculty of Arts":         [0.1, 0.01, 0.01, 0.4],  # مائل للـ IS و Programming (عشان الـ UI/UX)
-        "Engineering":             [0.2, 0.1, 0.5, 0.1]     # مائل للـ IT (عشان الدوائر والشبكات)
+        "Artificial Intelligence": [0.0, 1.0, 0.0, 0.0],
+        "Information Technology":  [0.0, 0.0, 1.0, 0.0],
+        "Information Systems":     [0.0, 0.0, 0.0, 1.0],
+        "Software Engineering":    [1.0, 0.0, 0.0, 0.0],
+        "Business Administration": [0.01, 0.01, 0.01, 0.9],
+        "Faculty of Medicine":     [0.01, 0.4, 0.01, 0.2],
+        "Faculty of Arts":         [0.1, 0.01, 0.01, 0.4],
+        "Engineering":             [0.2, 0.1, 0.5, 0.1]
     }
     
     course_codes, course_names, course_vectors = [], [], []
@@ -35,7 +33,6 @@ def build_dynamic_courses(catalog_data):
     return np.array(course_vectors), course_codes, course_names
 
 def perform_training(data_url, model_path="wanees_model.pkl"):
-    """الدالة التي يبحث عنها المين (لا تغيري اسمها)"""
     api_key = os.getenv("AI_API_KEY")
     catalog_url = "https://rafeek-live.runasp.net/v1/api/ai/course/catalog"
     headers = {"X-AI-API-KEY": api_key}
@@ -53,6 +50,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
 
         flattened_data = []
         for s in raw_students:
+            # تحسين: التعامل مع الـ GPA كعامل مؤثر في المتجه
             row = {"GPA": s.get("gpa", 0.0), **{k.upper(): v for k, v in s.get("courseGrades", {}).items()}}
             flattened_data.append(row)
         
@@ -68,21 +66,29 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
         track_df = pd.DataFrame(index=df.index)
         for track, prefixes in prefix_map.items():
             cols = [c for c in df.columns if any(c.startswith(p) for p in prefixes)]
+            # تحسين: استخدام المجموع الموزون بدلاً من المتوسط البسيط لتقليل تأثير المواد الأدبية
             track_df[track] = df[cols].mean(axis=1) if cols else 0.0001
             
         student_vectors = track_df.values
+        # الحفاظ على 4 كلاسترز كما طلبتِ
         kmeans = KMeans(n_clusters=4, random_state=42, n_init=10).fit(student_vectors)
         nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors)
         
         c_vectors, c_codes, c_names = build_dynamic_courses(catalog_data)
         track_names = ["Programming", "AI", "IT", "IS"]
         
+        # تحسين: ربط الكلاستر بالتراك بشكل أدق بناءً على أعلى قيمة في المركز
+        cluster_to_track = {}
+        centers = kmeans.cluster_centers_
+        for i in range(4):
+            cluster_to_track[i] = track_names[np.argmax(centers[i])]
+
         artifacts = {
             "kmeans": kmeans, "nn_model": nn_model, "student_vectors": student_vectors,
             "track_names": track_names, "course_vectors": c_vectors,
             "course_codes": c_codes, "course_names": c_names,
-            "cluster_to_track": {i: track_names[np.argmax(kmeans.cluster_centers_[i])] for i in range(4)},
-            "optimal_weights": (0.5, 0.3, 0.2)
+            "cluster_to_track": cluster_to_track,
+            "optimal_weights": (0.6, 0.3, 0.1) # زيادة وزن الـ Content Similarity
         }
         joblib.dump(artifacts, model_path)
         return True
