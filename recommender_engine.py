@@ -29,7 +29,9 @@ class WanisEngine:
     def get_recommendation(self, student_dict):
         try:
             # 1. تجهيز البيانات
-            clean_dict = {k.upper(): v for k, v in student_dict.items()}
+            clean_dict = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
+            gpa_val = float(student_dict.get("GPA", 0.0))
+            
             prefix_map = {
                 "Programming": ["CS", "SWE"], 
                 "AI": ["AI", "ML"], 
@@ -45,10 +47,19 @@ class WanisEngine:
                 track_scores.append(np.mean(vals) if vals else 0.0001)
             
             student_vec = np.array(track_scores).reshape(1, -1)
-            cluster_id = self.kmeans.predict(student_vec)[0]
-            dominant_track = self.cluster_to_track.get(cluster_id, "General")
             
-            # حساب قوة التراك المهيمن
+            # --- تحسين منطق اختيار التراك (Hybrid Logic) ---
+            cluster_id = self.kmeans.predict(student_vec)[0]
+            system_dominant = self.cluster_to_track.get(cluster_id, "General")
+            
+            # إذا كان الطالب متفوقاً جداً في تراك معين (أعلى من 80)، نعتبره التراك الأساسي له
+            max_idx = np.argmax(track_scores)
+            if track_scores[max_idx] > 80:
+                dominant_track = self.track_names[max_idx]
+            else:
+                dominant_track = system_dominant
+            
+            # حساب قوة التراك المختار للثقة
             track_idx = self.track_names.index(dominant_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
             
@@ -58,13 +69,13 @@ class WanisEngine:
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
             collab_sims = cosine_similarity(self.student_vectors[neighbors].mean(axis=0).reshape(1, -1), self.course_vectors)[0]
             
-            gpa_val = float(student_dict.get("GPA", 0.0))
             trend_boost = 0.15 if gpa_val >= 3.5 else 0.10
             final_scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend_boost)
             
-            taken_courses = [k for k in clean_dict if k != "GPA"]
+            taken_courses = list(clean_dict.keys())
             
             # 4. فلترة التخصص (Allowed Prefixes)
+            # تحسين: السماح بمواد من تراكات أخرى لو السكور عالي جداً (Cross-track recommendation)
             track_allowed_prefix = {
                 "Programming": ["CS", "SWE"],
                 "AI": ["AI", "ML"],
@@ -76,46 +87,27 @@ class WanisEngine:
             recs = []
             max_score = np.max(final_scores) if len(final_scores) > 0 else 1
 
-            # الحلقة الأولى: الفلترة الصارمة حسب التراك
             for i in range(len(self.course_codes)):
                 course_code = self.course_codes[i]
-
-                if not any(course_code.startswith(p) for p in allowed_prefixes):
-                    continue
-                
-                if course_code in taken_courses:
-                    continue
+                if course_code in taken_courses: continue
                 
                 score = float(final_scores[i])
-                confidence_val = round((score / max_score) * 100, 1)
+                
+                # إضافة Bonus للمواد التي تنتمي لتراك الطالب المختار
+                is_in_track = any(course_code.startswith(p) for p in allowed_prefixes)
+                if is_in_track:
+                    score *= 1.2 # زيادة 20% للمواد التي في تخصصه
+                
+                confidence_val = round((score / (max_score * 1.2)) * 100, 1)
                 
                 recs.append({
                     "course_code": course_code,
                     "course_name": self.course_names[i],
                     "score": round(score, 4),
-                    "confidence": f"{confidence_val}%"
+                    "confidence": f"{min(confidence_val, 100.0)}%"
                 })
 
-            # 5. منطق الـ Fallback: لو ملقاش مواد كفاية في تراك الطالب
-            if len(recs) < 2:
-                for i in range(len(self.course_codes)):
-                    code = self.course_codes[i]
-                    # تخطي لو المادة أخدها أو موجودة فعلاً في الترشيحات
-                    if code in taken_courses or any(r["course_code"] == code for r in recs):
-                        continue
-                    
-                    score = float(final_scores[i])
-                    # استخدام max_score الموحد لمنع الـ Error
-                    confidence_val = round((score / max_score) * 100, 1)
-                    
-                    recs.append({
-                        "course_code": code, 
-                        "course_name": self.course_names[i], 
-                        "score": round(score, 4), 
-                        "confidence": f"{confidence_val}%"
-                    })
-            
-            # 6. الرد النهائي المرتب
+            # 5. الرد النهائي المرتب
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{round(track_conf_raw, 1)}%",
