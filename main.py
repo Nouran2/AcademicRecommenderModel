@@ -79,7 +79,10 @@ async def recommend(student_id: str):
                 gpa = data_body.get("gpa") or data_body.get("GPA") or 0.0
                 # فك تداخل المواد الدراسية
                 grades = data_body.get("courseGrades", {})
-                
+                grades={ 
+                     k.upper(): v
+                     for k, v in grades_raw.items()
+                }
                 student_info = {"GPA": float(gpa), **grades}
                 student_cache[clean_id] = student_info
                 
