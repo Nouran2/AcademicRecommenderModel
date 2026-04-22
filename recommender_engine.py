@@ -1,3 +1,4 @@
+#ده بتاع الريكومندر لو هعوز اخليه يبعتلى مواد التراك المختار بشكل صارم 
 import joblib
 import numpy as np
 import logging
@@ -29,11 +30,15 @@ class WanisEngine:
     def get_recommendation(self, student_dict):
         try:
             # 1. تجهيز البيانات
-            clean_dict = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
-            gpa_val = float(student_dict.get("GPA", 0.0))
-            prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
+            clean_dict = {k.upper(): v for k, v in student_dict.items()}
+            prefix_map = {
+                "Programming": ["CS", "SWE"], 
+                "AI": ["AI", "ML"], 
+                "IT": ["IT", "NET", "ENG"], 
+                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
+            }
             
-            # 2. حساب بصمة الطالب
+            # 2. حساب بصمة الطالب (Track Vector)
             track_scores = []
             for t in self.track_names:
                 prefixes = prefix_map[t]
@@ -42,63 +47,85 @@ class WanisEngine:
             
             student_vec = np.array(track_scores).reshape(1, -1)
             cluster_id = self.kmeans.predict(student_vec)[0]
-            system_dominant = self.cluster_to_track.get(cluster_id, "General")
+            dominant_track = self.cluster_to_track.get(cluster_id, "General")
             
-            # كسر التعادل لو الطالب متفوق في تراك آخر
-            max_idx = np.argmax(track_scores)
-            dominant_track = self.track_names[max_idx] if track_scores[max_idx] > 80 else system_dominant
-            
+            # حساب قوة التراك المهيمن
             track_idx = self.track_names.index(dominant_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
             
-            # 3. الحساب الهجين
+            # 3. الحساب الهجين (Hybrid Scoring)
             w1, w2, w3 = self.weights
             content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
             collab_sims = cosine_similarity(self.student_vectors[neighbors].mean(axis=0).reshape(1, -1), self.course_vectors)[0]
             
+            gpa_val = float(student_dict.get("GPA", 0.0))
             trend_boost = 0.15 if gpa_val >= 3.5 else 0.10
             final_scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend_boost)
             
-            taken_courses = list(clean_dict.keys())
-            allowed_prefixes = prefix_map.get(dominant_track, [])
-            recs = []
+            taken_courses = [k for k in clean_dict if k != "GPA"]
             
-            # كسر التعادل البسيط (Tie Breaker)
-            for i in range(len(final_scores)):
-                final_scores[i] += (i * 0.000001)
+            # 4. فلترة التخصص (Allowed Prefixes)
+            track_allowed_prefix = {
+                "Programming": ["CS", "SWE"],
+                "AI": ["AI", "ML"],
+                "IT": ["IT", "NET", "ENG"],
+                "IS": ["IS", "BUS", "HUM", "ART", "MED"]
+            }
+            allowed_prefixes = track_allowed_prefix.get(dominant_track, [])
 
-            max_score_all = np.max(final_scores) if len(final_scores) > 0 else 1
+            recs = []
+            max_score = np.max(final_scores) if len(final_scores) > 0 else 1
 
+            # الحلقة الأولى: الفلترة الصارمة حسب التراك
             for i in range(len(self.course_codes)):
-                code = self.course_codes[i]
-                if code in taken_courses: continue
+                course_code = self.course_codes[i]
+
+                if not any(course_code.startswith(p) for p in allowed_prefixes):
+                    continue
+                
+                if course_code in taken_courses:
+                    continue
                 
                 score = float(final_scores[i])
-                is_in_track = any(code.startswith(p) for p in allowed_prefixes)
-                if is_in_track: score *= 1.2 # بونص التخصص
+                confidence_val = round((score / max_score) * 100, 1)
                 
-                confidence_val = round((score / (max_score_all * 1.2)) * 100, 1)
                 recs.append({
-                    "course_code": code, "course_name": self.course_names[i],
-                    "score": round(score, 4), "confidence": f"{min(confidence_val, 100.0)}%",
-                    "is_in_track": is_in_track
+                    "course_code": course_code,
+                    "course_name": self.course_names[i],
+                    "score": round(score, 4),
+                    "confidence": f"{confidence_val}%"
                 })
 
-            # 4. منطق الـ Fallback لضمان عدم ظهور قائمة فارغة
-            sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
-            final_output = [r for r in sorted_recs if r["is_in_track"]][:3]
-            if len(final_output) < 2:
-                final_output = sorted_recs[:3]
-
+            # 5. منطق الـ Fallback: لو ملقاش مواد كفاية في تراك الطالب
+            if len(recs) < 2:
+                for i in range(len(self.course_codes)):
+                    code = self.course_codes[i]
+                    # تخطي لو المادة أخدها أو موجودة فعلاً في الترشيحات
+                    if code in taken_courses or any(r["course_code"] == code for r in recs):
+                        continue
+                    
+                    score = float(final_scores[i])
+                    # استخدام max_score الموحد لمنع الـ Error
+                    confidence_val = round((score / max_score) * 100, 1)
+                    
+                    recs.append({
+                        "course_code": code, 
+                        "course_name": self.course_names[i], 
+                        "score": round(score, 4), 
+                        "confidence": f"{confidence_val}%"
+                    })
+            
+            # 6. الرد النهائي المرتب
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{round(track_conf_raw, 1)}%",
                 "track_reasoning": f"Based on your profile, you show high alignment with {dominant_track}.",
-                "recommendations": final_output
+                "recommendations": sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
             }
+
         except Exception as e:
-            logger.error(f"Error: {e}")
+            logger.error(f"Recommendation generation error: {e}")
             return {"error": str(e)}
 
     def retrain_model(self, data_url):
