@@ -12,14 +12,14 @@ from trainer import perform_training
 # --- 1. إعدادات الـ Logging والـ FastAPI ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Professional API", version="2.7.0")
+app = FastAPI(title="Wanees Professional API", version="3.0.0")
 
 # --- 2. Pydantic Models (للتوثيق وظهور الـ Score) ---
 class CourseRec(BaseModel):
     course_code: str
     course_name: str
     confidence: str
-    score: float # يظهر كأرقام عشرية دقيقة
+    score: float 
 
 class RecResponse(BaseModel):
     status: str
@@ -35,12 +35,10 @@ AI_API_KEY = os.getenv("AI_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 MODEL_PATH = "wanees_model.pkl"
 
-# روابط الـ API الخاصة بجامعة المنصورة
+ANALYTICS_DUMP_URL = f"{BASE_URL}/v1/api/ai/analytics/dump"
 STUDENT_GRADES_URL = BASE_URL + "/v1/api/ai/student/{student_id}/grades"
 COURSE_CATALOG_URL = BASE_URL + "/v1/api/ai/course/catalog"
-ANALYTICS_DUMP_URL = BASE_URL + "/v1/api/ai/analytics/dump"
 
-# إعدادات الذاكرة المؤقتة والوقت
 student_cache = TTLCache(maxsize=1000, ttl=600)
 custom_timeout = httpx.Timeout(connect=5.0, read=10.0, write=5.0, pool=5.0)
 
@@ -49,29 +47,42 @@ http_client = httpx.AsyncClient(timeout=custom_timeout)
 engine_lock = asyncio.Lock()
 retrain_lock = asyncio.Lock()
 
-# --- 4. أحداث البداية والنهاية ---
+# --- 4. أحداث البداية والنهاية (تعديل التدريب التلقائي) ---
 @app.on_event("startup")
 async def startup_event():
     global engine
+    
+    # 🔥 لو الموديل مش موجود على السيرفر (زي ريندر)، يدرّب نفسه فوراً
+    if not os.path.exists(MODEL_PATH):
+        logger.info("⚠️ الموديل مفقود من السيرفر، جاري التدريب التلقائي الآن...")
+        # ننده الدالة مباشرة من ملف trainer
+        success = perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
+        if success:
+            logger.info("✅ تم التدريب التلقائي بنجاح عند التشغيل.")
+        else:
+            logger.error("❌ فشل التدريب التلقائي، السيرفر يعمل بوضع الانتظار.")
+
     try:
-        engine = WanisEngine(MODEL_PATH)
-        logger.info(" ونيس والموديل جاهزين للعمل.")
-    except:
-        logger.warning(" الموديل غير موجود، السيرفر يعمل بوضع الانتظار.")
+        if os.path.exists(MODEL_PATH):
+            engine = WanisEngine(MODEL_PATH)
+            logger.info("✅ ونيس والموديل جاهزين للعمل.")
+        else:
+            engine = None
+    except Exception as e:
+        logger.error(f"⚠️ فشل تحميل المحرك: {e}")
         engine = None
 
 @app.get("/health")
 def health():
     return {"status": "active", "model_loaded": engine is not None}
 
-# --- 5. منطق الـ Cold Start (للطلاب الجدد أو غير الموجودين) ---
+# --- 5. منطق الـ Cold Start ---
 async def get_cold_start(student_id: str):
     try:
         resp = await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})
         if resp.status_code == 200:
             full_json = resp.json()
             catalog_list = full_json.get("data", [])
-            # ترشيح أول 3 مواد من الكتالوج العام بـ Score افتراضي
             recs = [
                 {
                     "course_code": c.get("code", "N/A"),
@@ -85,30 +96,26 @@ async def get_cold_start(student_id: str):
         logger.error(f"Cold Start Error: {e}")
         recs = []
     
-    if not recs:
-        recs = [{"course_code": "CS101", "course_name": "General Computer Science", "confidence": "90.0%", "score": 1.0}]
-    
     return {
         "status": "cold_start",
         "source": "university_catalog",
         "dominant_track": "General Discovery",
         "track_confidence": "100%",
-        "track_reasoning": "Welcome! Since you are a new student, we recommend these essential courses.",
-        "recommendations": recs
+        "track_reasoning": "Welcome! We recommend these essential courses from the catalog.",
+        "recommendations": recs or [{"course_code": "CS101", "course_name": "General CS", "confidence": "90.0%", "score": 1.0}]
     }
 
 # --- 6. نقطة التوصية الرئيسية ---
 @app.get("/recommend/{student_id}", response_model=RecResponse)
 async def recommend(student_id: str):
     if engine is None: 
-        raise HTTPException(status_code=503, detail="الموديل غير متاح، يرجى عمل Retrain أولاً.")
+        raise HTTPException(status_code=503, detail="الموديل قيد التحضير، يرجى المحاولة بعد لحظات.")
     
     clean_id = student_id.strip()
     if clean_id in student_cache:
         async with engine_lock:
             return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
-    # محاولة جلب البيانات (3 محاولات)
     for attempt in range(3):
         try:
             url = STUDENT_GRADES_URL.format(student_id=clean_id)
@@ -126,12 +133,11 @@ async def recommend(student_id: str):
                 return await get_cold_start(clean_id)
             
             await asyncio.sleep(1)
-        except HTTPException as e: raise e
         except Exception as e:
             logger.error(f"Attempt {attempt + 1} failed: {e}")
             await asyncio.sleep(1)
             
-    raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب حالياً.")
+    raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب.")
 
 # --- 7. نقطة إعادة التدريب (Retrain) ---
 @app.post("/retrain")
@@ -143,12 +149,11 @@ async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(.
         global engine
         async with retrain_lock:
             loop = asyncio.get_running_loop()
-            # استدعاء مباشر لـ trainer لتخطي مشكلة الـ NoneType الأولية
             success = await loop.run_in_executor(None, perform_training, ANALYTICS_DUMP_URL, MODEL_PATH)
             if success:
                 engine = WanisEngine(MODEL_PATH)
                 student_cache.clear()
-                logger.info(" تم تحديث الموديل والمحرك بنجاح.")
+                logger.info("✅ تم تحديث الموديل بنجاح.")
 
     background_tasks.add_task(retrain_safe)
-    return {"message": "بدأت عملية إعادة التدريب في الخلفية، راقب صفحة الـ Health."}
+    return {"message": "بدأت عملية إعادة التدريب في الخلفية."}
