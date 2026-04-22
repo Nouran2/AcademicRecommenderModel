@@ -28,14 +28,12 @@ class WanisEngine:
 
     def get_recommendation(self, student_dict):
         try:
+            # 1. تجهيز البيانات
             clean_dict = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
             gpa_val = float(student_dict.get("GPA", 0.0))
+            prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI", "ML"], "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]}
             
-            prefix_map = {
-                "Programming": ["CS", "SWE"], "AI": ["AI", "ML"], 
-                "IT": ["IT", "NET", "ENG"], "IS": ["IS", "BUS", "HUM", "ART", "MED"]
-            }
-            
+            # 2. حساب بصمة الطالب
             track_scores = []
             for t in self.track_names:
                 prefixes = prefix_map[t]
@@ -46,14 +44,14 @@ class WanisEngine:
             cluster_id = self.kmeans.predict(student_vec)[0]
             system_dominant = self.cluster_to_track.get(cluster_id, "General")
             
-            # كسر ديكتاتورية الموديل لو الطالب متفوق في تراك آخر
+            # كسر التعادل لو الطالب متفوق في تراك آخر
             max_idx = np.argmax(track_scores)
             dominant_track = self.track_names[max_idx] if track_scores[max_idx] > 80 else system_dominant
             
             track_idx = self.track_names.index(dominant_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
             
-            # الحساب الهجين
+            # 3. الحساب الهجين
             w1, w2, w3 = self.weights
             content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
@@ -63,12 +61,10 @@ class WanisEngine:
             final_scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend_boost)
             
             taken_courses = list(clean_dict.keys())
-            
-            # منطق الفلترة مع بونص التخصص
             allowed_prefixes = prefix_map.get(dominant_track, [])
             recs = []
             
-            # كسر التعادل (Tie Breaker)
+            # كسر التعادل البسيط (Tie Breaker)
             for i in range(len(final_scores)):
                 final_scores[i] += (i * 0.000001)
 
@@ -80,7 +76,7 @@ class WanisEngine:
                 
                 score = float(final_scores[i])
                 is_in_track = any(code.startswith(p) for p in allowed_prefixes)
-                if is_in_track: score *= 1.2 
+                if is_in_track: score *= 1.2 # بونص التخصص
                 
                 confidence_val = round((score / (max_score_all * 1.2)) * 100, 1)
                 recs.append({
@@ -89,7 +85,7 @@ class WanisEngine:
                     "is_in_track": is_in_track
                 })
 
-            # منطق الـ Fallback لضمان عدم ظهور قائمة فارغة
+            # 4. منطق الـ Fallback لضمان عدم ظهور قائمة فارغة
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
             final_output = [r for r in sorted_recs if r["is_in_track"]][:3]
             if len(final_output) < 2:
