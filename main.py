@@ -78,7 +78,7 @@ async def recommend(student_id: str):
                     return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
             
             elif resp.status_code in [400, 404]:
-                raise HTTPException(status_code=404, detail="Student not found.")
+                return await get_cold_start(clean_id)
             
             await asyncio.sleep(1)
         except HTTPException as e: raise e
