@@ -22,37 +22,34 @@ class WanisEngine:
         self.cluster_to_track = self.artifacts["cluster_to_track"]
         self.weights = self.artifacts["optimal_weights"]
 
-    def _get_student_vec(self, student_dict):
-        prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI"], "IT": ["IT"], "IS": ["IS"]}
-        scores = []
-        for t in self.track_names:
-            prefixes = prefix_map[t]
-            vals = [student_dict[c] for c in student_dict if any(c.startswith(p) for p in prefixes)]
-            scores.append(np.mean(vals) if vals else 0.0001)
-        return np.array(scores).reshape(1, -1)
-
     def get_recommendation(self, student_dict):
         try:
+            # 1. توحيد الداتا
             clean_dict = {k.upper(): v for k, v in student_dict.items()}
-            student_vec = self._get_student_vec(clean_dict)
             
-            # تحديد التراك
+            # 2. حساب بصمة الطالب
+            prefix_map = {"Programming": ["CS", "SWE"], "AI": ["AI"], "IT": ["IT"], "IS": ["IS"]}
+            scores = []
+            for t in self.track_names:
+                prefixes = prefix_map[t]
+                vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
+                scores.append(np.mean(vals) if vals else 0.0001)
+            
+            student_vec = np.array(scores).reshape(1, -1)
             cluster_id = self.kmeans.predict(student_vec)[0]
             dominant_track = self.cluster_to_track.get(cluster_id, "General")
             
-            # حساب السكور الهجين
+            # 3. الحساب الهجين
             w1, w2, w3 = self.weights
             content_sims = cosine_similarity(student_vec, self.course_vectors)[0]
-            
             neighbors = self.nn_model.kneighbors(student_vec)[1][0][1:]
             collab_sims = cosine_similarity(self.student_vectors[neighbors].mean(axis=0).reshape(1, -1), self.course_vectors)[0]
             
             gpa_val = float(student_dict.get("GPA", 0.0))
             trend_boost = 0.15 if gpa_val >= 3.5 else 0.10
-            
             final_scores = (w1 * content_sims) + (w2 * collab_sims) + (w3 * trend_boost)
             
-            # فلترة المواد اللي الطالب أخدها
+            # 4. فلترة المواد المأخوذة لضمان جودة التوصية
             taken_courses = [k for k in clean_dict if k != "GPA"]
             recs = []
             for i in range(len(self.course_names)):
@@ -70,7 +67,6 @@ class WanisEngine:
                 "recommendations": sorted(recs, key=lambda x: x["confidence"], reverse=True)[:3]
             }
         except Exception as e:
-            logger.error(f"Recommendation Error: {e}")
             return {"error": str(e)}
 
     def retrain_model(self, data_url):
