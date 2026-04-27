@@ -11,7 +11,7 @@ from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Academic API", version="5.3.0")
+app = FastAPI(title="Wanees Expert AI", version="5.4.0")
 
 class CourseRec(BaseModel):
     course_code: str
@@ -27,7 +27,7 @@ class RecResponse(BaseModel):
     track_reasoning: str
     recommendations: List[CourseRec]
 
-# الإعدادات
+# Config
 BASE_URL = "https://rafeek-live.runasp.net"
 AI_API_KEY = os.getenv("AI_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
@@ -37,23 +37,23 @@ STUDENT_GRADES_URL = BASE_URL + "/v1/api/ai/student/{student_id}/grades"
 COURSE_CATALOG_URL = BASE_URL + "/v1/api/ai/course/catalog"
 
 student_cache = TTLCache(maxsize=1000, ttl=600)
-http_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=5.0, read=15.0))
-engine: Optional[WanisEngine] = None
+# 🔥 الإصلاح: تحديد الـ Timeout بشكل صريح لكل المعايير
+custom_timeout = httpx.Timeout(15.0, connect=5.0, read=15.0, write=5.0, pool=5.0)
+http_client = httpx.AsyncClient(timeout=custom_timeout)
 engine_lock = asyncio.Lock()
 
 @app.on_event("startup")
 async def startup_event():
     global engine
     if not os.path.exists(MODEL_PATH):
-        logger.info("Training initial model...")
-        # تدريب سريع لبداية التشغيل
         perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
     if os.path.exists(MODEL_PATH):
         try:
+            from recommender import WanisEngine
             engine = WanisEngine(MODEL_PATH)
-            logger.info("✅ Wanees 5.3 Ready.")
+            logger.info("✅ Wanees API is Live.")
         except Exception as e:
-            logger.error(f"Engine Load Fail: {e}")
+            logger.error(f"Startup Fail: {e}")
 
 @app.get("/health")
 def health(): return {"status": "active", "model_loaded": engine is not None}
@@ -79,8 +79,8 @@ async def recommend(student_id: str):
             recs = [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100%", "score": 1.0}]
             return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "100%", "track_reasoning": "Welcome!", "recommendations": recs}
     except Exception as e:
-        logger.error(f"Request Error: {e}")
-    raise HTTPException(status_code=503, detail="University server issue")
+        logger.error(f"Req Error: {e}")
+    raise HTTPException(status_code=503, detail="University API Error")
 
 @app.post("/retrain")
 async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(...)):
