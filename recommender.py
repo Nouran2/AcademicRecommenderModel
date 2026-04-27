@@ -25,123 +25,104 @@ class WanisEngine:
         except: return 1
 
     def _sigmoid(self, x):
-        """دالة السيجمويد لمعايرة الفجوة بين الاحتمالات"""
         return 1 / (1 + np.exp(-x))
 
+    def _softmax(self, scores, temperature=2.0):
+        z = np.array(scores) / temperature
+        exp_z = np.exp(z - np.max(z))
+        return exp_z / exp_z.sum()
+
     def _predict_track(self, clean_dict):
-        """
-        🚀 Uncertainty Modeling Layer
-        تحقيق طبقات المعايرة الثلاث: Relative Gap, Evidence Strength, Anti-Overconfidence
-        """
-        prefix_map = {
-            "Software Engineering": ["SWE"], "Computer Science": ["CS"],
-            "Artificial Intelligence": ["AI"], "Bioinformatics": ["BIO"],
-            "Information Technology": ["IT"], "Information Systems": ["IS"]
-        }
+        prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], 
+                      "Bioinformatics": ["BIO"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
         
         track_scores = []
         track_counts = []
-        track_variances = []
-        
         for t in self.track_names:
             prefixes = prefix_map.get(t, [])
             vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
-            
             if vals:
                 mean_v = np.mean(vals)
                 count = len(vals)
-                variance = np.var(vals) if count > 1 else 100 # عقوبة العينة الصغيرة
+                var = np.var(vals) if count > 1 else 50
+                consistency = 1 / (1 + np.sqrt(var) / 100)
                 
-                # 🧩 Layer 1: Evidence-based scoring (Coverage + Consistency)
-                # استخدام log1p للوزن، وتقليل السكور لو الـ variance عالي (تذبذب مستوى الطالب)
-                consistency_bonus = 1 / (1 + np.sqrt(variance)/100)
-                score = mean_v * np.log1p(count) * consistency_bonus
+                # Penalize weak grades
+                penalty = 0.6 if np.min(vals) < 50 else (0.8 if np.min(vals) < 60 else 1.0)
                 
-                track_scores.append(score)
+                # Weighted Score = mean * log(1+count) * consistency * penalty
+                track_scores.append(mean_v * np.log1p(count) * consistency * penalty)
                 track_counts.append(count)
-                track_variances.append(variance)
             else:
-                track_scores.append(0.001)
-                track_counts.append(0)
-                track_variances.append(0)
+                track_scores.append(0.001); track_counts.append(0)
 
-        # حساب الاحتمالات باستخدام Softmax (الخام)
-        z = np.array(track_scores) / 2.0
-        probs = np.exp(z - np.max(z)) / np.sum(np.exp(z - np.max(z)))
-        
+        probs = self._softmax(track_scores)
         idx = np.argmax(probs)
-        top1_prob = probs[idx]
         
-        # 🧩 Layer 2: Relative Gap Scoring (Sigmoid Calibration)
-        # جلب ثاني أعلى احتمال لحساب الفجوة (Competition Gap)
-        sorted_probs = sorted(probs, reverse=True)
-        top2_prob = sorted_probs[1] if len(sorted_probs) > 1 else 0
-        gap = top1_prob - top2_prob
+        # Margin-based Sigmoid Calibration
+        sorted_probs = np.sort(probs)[::-1]
+        gap = sorted_probs[0] - sorted_probs[1] if len(sorted_probs) > 1 else sorted_probs[0]
+        conf = self._sigmoid(gap * 8 - 2) * 100
         
-        # معايرة الثقة باستخدام السيجمويد: كلما زاد الفرق، زادت الثقة بشكل غير خطي
-        calibrated_conf = self._sigmoid(gap * 8 - 2) * 100 
-
-        # 🧩 Layer 3: Anti-overconfidence Cap
-        # منع الثقة من تخطي 96% إلا في حالات الأدلة القاطعة (تغطية عالية وفجوة كبيرة)
-        max_cap = 96.0
-        if gap > 0.4 and track_counts[idx] >= 3:
-            max_cap = 98.0
-        
-        final_confidence = round(min(calibrated_conf, max_cap), 1)
-        
-        # توليد Reasoning متغير بناءً على الحالة (Dynamic Explanation)
-        reasoning = self._generate_reasoning(dominant_track=self.track_names[idx], gap=gap, count=track_counts[idx])
-
-        return self.track_names[idx], final_confidence, track_scores, reasoning
-
-    def _generate_reasoning(self, dominant_track, gap, count):
-        if gap > 0.4:
-            return f"High certainty: Distinct specialization in {dominant_track} with robust evidence."
-        elif gap > 0.15:
-            return f"Moderate certainty: Performance aligns primarily with {dominant_track}."
-        else:
-            return f"Cautionary alignment: Narrow gap detected; {dominant_track} is slightly ahead in academic evidence."
+        # Realistic Cap
+        cap = 97.5 if gap > 0.4 and track_counts[idx] >= 3 else 95.0
+        return self.track_names[idx], round(min(conf, cap), 1), track_scores
 
     def get_recommendation(self, student_dict):
         try:
-            clean_dict = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
-            gpa_val = float(student_dict.get("GPA", 0.0))
-            
-            # استدعاء طبقة المعايرة الجديدة
-            dominant_track, track_conf, track_scores, reasoning = self._predict_track(clean_dict)
-            
-            current_level = max([self._extract_level(c) for c in clean_dict.keys()]) if clean_dict else 1
-            raw_track_vec = np.array(track_scores).reshape(1, -1)
-            scaled_vec = self.scaler.transform(raw_track_vec)
-            neighbors = self.nn_model.kneighbors(scaled_vec)[1][0][1:]
-            neighbor_mean_6d = self.student_vectors[neighbors].mean(axis=0)
+            clean = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
+            gpa = float(student_dict.get("GPA", 0.0))
+            dominant_track, track_conf, raw_track_scores = self._predict_track(clean)
 
-            # دمج المستوى (7D)
+            # ✅ BUILD 6D STUDENT VECTOR (Matching Training Space)
+            prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], 
+                          "Bioinformatics": ["BIO"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
+            track_vector = []
+            for track in self.track_names:
+                prefixes = prefix_map.get(track, [])
+                vals = [clean[c] for c in clean if any(c.startswith(p) for p in prefixes)]
+                track_vector.append(np.mean(vals) if vals else 0.0)
+
+            # التحجيم والبحث عن الجيران (6D)
+            track_vec_6d = np.array(track_vector).reshape(1, -1)
+            track_vec_scaled = self.scaler.transform(track_vec_6d)
+            neighbors = self.nn_model.kneighbors(track_vec_scaled)[1][0][1:]
+            neighbor_vec_6d = self.student_vectors[neighbors].mean(axis=0)
+
+            # ✅ BUILD 7D STUDENT VECTOR (Matching Course Space)
+            current_level = max([self._extract_level(c) for c in clean.keys()]) if clean else 1
             level_feat = current_level / 4.0
-            student_7d = np.append(raw_track_vec / 100.0, level_feat).reshape(1, -1)
-            neighbor_7d = np.append(neighbor_mean_6d, level_feat).reshape(1, -1)
+            student_7d = np.append(track_vec_scaled, level_feat).reshape(1, -1)
+            neighbor_7d = np.append(neighbor_vec_6d, level_feat).reshape(1, -1)
 
+            # حساب التشابه الهجين
             sim_content = cosine_similarity(student_7d, self.course_vectors)[0]
             sim_collab = cosine_similarity(neighbor_7d, self.course_vectors)[0]
 
             recs = []
             allowed = [current_level, current_level + 1]
-            for i in range(len(self.course_codes)):
-                code = self.course_codes[i]
-                if code in clean_dict or self._extract_level(code) not in allowed: continue
+            for i, code in enumerate(self.course_codes):
+                if code in clean or self._extract_level(code) not in allowed: continue
                 
-                # سكور التوصية الهجين
-                score = (0.4 * sim_content[i]) + (0.3 * sim_collab[i]) + (0.3 * (gpa_val/4.0))
-                score += (i * 0.0001)
-                recs.append({"course_code": code, "course_name": self.course_names[i], "score": score})
+                # Track Alignment Boost
+                boost = 1.0 if any(code.startswith(p) for p in prefix_map[dominant_track]) else 0.85
+                score = (0.4 * sim_content[i] + 0.3 * sim_collab[i] + 0.3 * (gpa/4.0)) * boost
+                recs.append({"course_code": code, "course_name": self.course_names[i], "score": score, "cat": code[:2]})
 
-            sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)[:3]
-            max_s = sorted_recs[0]["score"] if sorted_recs else 1
-            
+            # Diversity Filter
+            recs = sorted(recs, key=lambda x: x["score"], reverse=True)
+            final, seen = [], set()
+            for r in recs:
+                if r["cat"] not in seen:
+                    final.append(r); seen.add(r["cat"])
+                if len(final) == 3: break
+
+            max_s = final[0]["score"] if final else 1
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{track_conf}%",
-                "track_reasoning": reasoning,
-                "recommendations": [{"course_code": r["course_code"], "course_name": r["course_name"], "confidence": f"{round((r['score']/max_s)*100, 1)}%", "score": round(r["score"], 4)} for r in sorted_recs]
+                "recommendations": [{"course_code": r["course_code"], "course_name": r["course_name"], 
+                                     "confidence": f"{round((r['score']/max_s)*100, 1)}%", "score": round(r["score"], 4)} for r in final]
             }
-        except Exception as e: return {"error": str(e)}
+        except Exception as e:
+            logger.error(f"Engine Error: {e}"); return {"error": str(e)}
