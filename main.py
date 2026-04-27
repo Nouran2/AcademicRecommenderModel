@@ -11,9 +11,8 @@ from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Academic API", version="5.2.0")
+app = FastAPI(title="Wanees Academic API", version="5.3.0")
 
-# حذف الـ tag من الموديل
 class CourseRec(BaseModel):
     course_code: str
     course_name: str
@@ -33,6 +32,7 @@ BASE_URL = "https://rafeek-live.runasp.net"
 AI_API_KEY = os.getenv("AI_API_KEY")
 ADMIN_KEY = os.getenv("ADMIN_KEY")
 MODEL_PATH = "wanees_model.pkl"
+ANALYTICS_DUMP_URL = f"{BASE_URL}/v1/api/ai/analytics/dump"
 STUDENT_GRADES_URL = BASE_URL + "/v1/api/ai/student/{student_id}/grades"
 COURSE_CATALOG_URL = BASE_URL + "/v1/api/ai/course/catalog"
 
@@ -45,10 +45,18 @@ engine_lock = asyncio.Lock()
 async def startup_event():
     global engine
     if not os.path.exists(MODEL_PATH):
-        perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH)
+        logger.info("Training initial model...")
+        # تدريب سريع لبداية التشغيل
+        perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
     if os.path.exists(MODEL_PATH):
-        engine = WanisEngine(MODEL_PATH)
-        logger.info("✅ Wanees 5.2 (Weighted Logic) Ready.")
+        try:
+            engine = WanisEngine(MODEL_PATH)
+            logger.info("✅ Wanees 5.3 Ready.")
+        except Exception as e:
+            logger.error(f"Engine Load Fail: {e}")
+
+@app.get("/health")
+def health(): return {"status": "active", "model_loaded": engine is not None}
 
 @app.get("/recommend/{student_id}", response_model=RecResponse)
 async def recommend(student_id: str):
@@ -58,21 +66,20 @@ async def recommend(student_id: str):
     if clean_id in student_cache:
         async with engine_lock: return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
-    resp = await http_client.get(STUDENT_GRADES_URL.format(student_id=clean_id), headers={"X-AI-API-KEY": AI_API_KEY})
-    
-    if resp.status_code == 200:
-        data = resp.json().get("data", {})
-        student_info = {"GPA": float(data.get("gpa", 0.0))}
-        student_info.update({k.upper(): v for k, v in data.get("courseGrades", {}).items()})
-        student_cache[clean_id] = student_info
-        async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
-    
-    elif resp.status_code in [400, 404]:
-        # حذف الـ tag من هنا أيضاً
-        cat = (await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})).json().get("data", [])[:3]
-        recs = [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100%", "score": 1.0}]
-        return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "100%", "track_reasoning": "Welcome!", "recommendations": recs}
-    
+    try:
+        resp = await http_client.get(STUDENT_GRADES_URL.format(student_id=clean_id), headers={"X-AI-API-KEY": AI_API_KEY})
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            student_info = {"GPA": float(data.get("gpa", 0.0))}
+            student_info.update({k.upper(): v for k, v in data.get("courseGrades", {}).items()})
+            student_cache[clean_id] = student_info
+            async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+        elif resp.status_code in [400, 404]:
+            cat = (await http_client.get(COURSE_CATALOG_URL, headers={"X-AI-API-KEY": AI_API_KEY})).json().get("data", [])[:3]
+            recs = [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100%", "score": 1.0}]
+            return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "100%", "track_reasoning": "Welcome!", "recommendations": recs}
+    except Exception as e:
+        logger.error(f"Request Error: {e}")
     raise HTTPException(status_code=503, detail="University server issue")
 
 @app.post("/retrain")
@@ -80,7 +87,7 @@ async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(.
     if x_admin_key != ADMIN_KEY: raise HTTPException(status_code=403)
     async def retrain_safe():
         global engine
-        if perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH):
+        if perform_training(ANALYTICS_DUMP_URL, MODEL_PATH):
             engine = WanisEngine(MODEL_PATH)
             student_cache.clear()
     background_tasks.add_task(retrain_safe)
