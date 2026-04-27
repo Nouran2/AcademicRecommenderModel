@@ -6,12 +6,12 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from typing import List, Optional
 from pydantic import BaseModel
 from cachetools import TTLCache
-from recommender import WanisEngine
+from recommender_engine import WanisEngine
 from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Mansoura University AI")
+app = FastAPI(title="Wanees Final Professional API")
 
 class CourseRec(BaseModel):
     course_code: str
@@ -47,15 +47,13 @@ retrain_lock = asyncio.Lock()
 @app.on_event("startup")
 async def startup_event():
     global engine
-    # تدريب تلقائي في البداية لو الموديل مش موجود
     if not os.path.exists(MODEL_PATH):
         logger.info("⚠️ الموديل مفقود، جاري التدريب التلقائي...")
         perform_training(ANALYTICS_DUMP_URL, MODEL_PATH)
-
     try:
         if os.path.exists(MODEL_PATH):
             engine = WanisEngine(MODEL_PATH)
-            logger.info("✅ ونيس جاهز للعمل.")
+            logger.info("✅ ونيس والموديل جاهزين للعمل.")
     except Exception as e:
         logger.error(f"⚠️ فشل تحميل الموديل: {e}")
         engine = None
@@ -79,7 +77,6 @@ async def recommend(student_id: str):
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 grades = data.get("courseGrades", {})
-                # تحويل كل المفاتيح لـ Uppercase لضمان التطابق
                 student_info = {"GPA": float(data.get("gpa", 0.0)), **{k.upper(): v for k, v in grades.items()}}
                 student_cache[clean_id] = student_info
                 async with engine_lock: 
@@ -92,7 +89,6 @@ async def recommend(student_id: str):
             await asyncio.sleep(1)
         except Exception as e:
             logger.error(f"Error: {e}"); await asyncio.sleep(1)
-    
     raise HTTPException(status_code=503, detail="سيرفر الجامعة لا يستجيب.")
 
 @app.post("/retrain")
