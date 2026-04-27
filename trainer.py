@@ -25,8 +25,7 @@ def build_course_vectors(catalog_data):
         lvl = extract_level(code)
         base = category_map.get(c.get("category", ""), [0.16]*6)
         vectors.append(base + [lvl / 4.0]) # 7 Dimensions
-        codes.append(code)
-        names.append(c.get("title", "Unknown"))
+        codes.append(code); names.append(c.get("title", "Unknown"))
     return np.array(vectors), codes, names
 
 def perform_training(data_url, model_path="wanees_model.pkl"):
@@ -49,17 +48,14 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             track_df[t] = df[cols].mean(axis=1) if cols else 0.001
             
         scaler = StandardScaler()
-        student_vectors = scaler.fit_transform(track_df.values)
-        kmeans = KMeans(n_clusters=6, random_state=42, n_init=10).fit(student_vectors)
-        nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors)
+        student_vectors_scaled = scaler.fit_transform(track_df.values)
+        kmeans = KMeans(n_clusters=6, random_state=42, n_init=10).fit(student_vectors_scaled)
+        nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors_scaled)
         c_vectors, c_codes, c_names = build_course_vectors(catalog_data)
         
-        joblib.dump({
-            "kmeans": kmeans, "nn_model": nn_model, "scaler": scaler, 
-            "student_vectors": student_vectors, "course_vectors": c_vectors, 
-            "course_codes": c_codes, "course_names": c_names, 
-            "track_names": list(prefix_map.keys())
-        }, model_path)
+        joblib.dump({"kmeans": kmeans, "nn_model": nn_model, "scaler": scaler, "student_vectors": student_vectors_scaled, 
+                     "course_vectors": c_vectors, "course_codes": c_codes, "course_names": c_names, 
+                     "track_names": list(prefix_map.keys())}, model_path)
         return True
     except Exception as e:
-        print(f"Error: {e}"); return False
+        print(f"Training Error: {e}"); return False
