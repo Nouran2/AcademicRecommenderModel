@@ -30,11 +30,10 @@ class WanisEngine:
         try:
             clean_dict = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
             gpa_val = float(student_dict.get("GPA", 0.0))
-            
             prefix_map = {
-                "Software Engineering":    ["SWE"], "Computer Science": ["CS"],
+                "Software Engineering": ["SWE"], "Computer Science": ["CS"],
                 "Artificial Intelligence": ["AI"], "Bioinformatics": ["BIO"],
-                "Information Technology":  ["IT"], "Information Systems": ["IS"]
+                "Information Technology": ["IT"], "Information Systems": ["IS"]
             }
             
             track_scores = []
@@ -45,7 +44,7 @@ class WanisEngine:
             
             student_vec = np.array(track_scores).reshape(1, -1)
             cluster_id = self.kmeans.predict(student_vec)[0]
-            dominant_track = self.cluster_to_track.get(cluster_id, "General Discovery")
+            dominant_track = self.cluster_to_track.get(cluster_id, "General")
             
             track_idx = self.track_names.index(dominant_track)
             track_conf_raw = (track_scores[track_idx] / sum(track_scores)) * 100
@@ -59,41 +58,22 @@ class WanisEngine:
             
             taken_courses = list(clean_dict.keys())
             allowed_prefixes = prefix_map.get(dominant_track, [])
-            
             recs = []
-            # كسر التعادل بإضافة تباين طفيف لضمان ترتيب دقيق
-            for i in range(len(final_scores)):
-                final_scores[i] += (i * 0.000001)
-
-            max_score_all = np.max(final_scores) if len(final_scores) > 0 else 1
+            max_score = np.max(final_scores) if len(final_scores) > 0 else 1
 
             for i in range(len(self.course_codes)):
                 code = self.course_codes[i]
                 if code in taken_courses: continue
-                
                 score = float(final_scores[i])
                 is_in_track = any(code.startswith(p) for p in allowed_prefixes)
                 
-                # بونص التخصص المستقل (1.3x) لضمان ظهور مواد التراك أولاً
                 final_score = score * 1.3 if is_in_track else score
-                
-                # حساب الـ Confidence النسبي
-                confidence_val = round((final_score / (max_score_all * 1.3)) * 100, 1)
-                
-                recs.append({
-                    "course_code": code,
-                    "course_name": self.course_names[i],
-                    "score": round(final_score, 4),
-                    "confidence": f"{min(confidence_val, 100.0)}%",
-                    "is_in_track": is_in_track
-                })
+                conf = round((final_score / (max_score * 1.3)) * 100, 1)
+                recs.append({"course_code": code, "course_name": self.course_names[i], "score": round(final_score, 4), "confidence": f"{min(conf, 100.0)}%", "in_track": is_in_track})
 
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
-            final_output = [r for r in sorted_recs if r["is_in_track"]][:3]
-            
-            # لو التراك خلص، هات الأفضل من الباقي (Fallback)
-            if len(final_output) < 2:
-                final_output = sorted_recs[:3]
+            final_output = [r for r in sorted_recs if r["in_track"]][:3]
+            if len(final_output) < 2: final_output = sorted_recs[:3]
 
             return {
                 "dominant_track": dominant_track,
@@ -101,13 +81,10 @@ class WanisEngine:
                 "track_reasoning": f"Your academic performance shows distinct specialization in {dominant_track}.",
                 "recommendations": [{"course_code": r["course_code"], "course_name": r["course_name"], "confidence": r["confidence"], "score": r["score"]} for r in final_output]
             }
-        except Exception as e:
-            logger.error(f"Engine logic error: {e}")
-            return {"error": str(e)}
+        except Exception as e: return {"error": str(e)}
 
     def retrain_model(self, data_url):
         from trainer import perform_training
         if perform_training(data_url, self.model_path):
             self._load_artifacts(); return True
         return False
-        
