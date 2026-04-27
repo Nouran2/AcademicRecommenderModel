@@ -6,12 +6,12 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from typing import List, Optional
 from pydantic import BaseModel
 from cachetools import TTLCache
-from recommender_engine import WanisEngine
+from recommender import WanisEngine
 from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Final Professional API")
+app = FastAPI(title="Wanees Mansoura Professional API")
 
 class CourseRec(BaseModel):
     course_code: str
@@ -53,9 +53,9 @@ async def startup_event():
     try:
         if os.path.exists(MODEL_PATH):
             engine = WanisEngine(MODEL_PATH)
-            logger.info("✅ ونيس والموديل جاهزين للعمل.")
+            logger.info("✅ ونيس جاهز للعمل.")
     except Exception as e:
-        logger.error(f"⚠️ فشل تحميل الموديل: {e}")
+        logger.error(f"⚠️ فشل التحميل: {e}")
         engine = None
 
 @app.get("/health")
@@ -77,6 +77,7 @@ async def recommend(student_id: str):
             if resp.status_code == 200:
                 data = resp.json().get("data", {})
                 grades = data.get("courseGrades", {})
+                # تصحيح الـ Syntax: استخدام الـ ** لدمج القواميس
                 student_info = {"GPA": float(data.get("gpa", 0.0)), **{k.upper(): v for k, v in grades.items()}}
                 student_cache[clean_id] = student_info
                 async with engine_lock: 
