@@ -20,7 +20,7 @@ def build_course_vectors(catalog_data):
         code = c.get("code", "").upper()
         lvl = extract_level(code)
         base = category_map.get(c.get("category", ""), [0.16]*6)
-        vectors.append(base + [lvl / 4.0]) # 7 Dimensions
+        vectors.append(base + [lvl / 4.0]) # ✅ 7 Dimensions
         codes.append(code)
         names.append(c.get("title", "Unknown"))
     return np.array(vectors), codes, names
@@ -44,7 +44,7 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             track_df[t] = df[cols].mean(axis=1) if cols else 0.001
             
         scaler = StandardScaler()
-        student_vectors = scaler.fit_transform(track_df.values)
+        student_vectors = scaler.fit_transform(track_df.values) # ✅ 6D Scaled Data
         kmeans = KMeans(n_clusters=6, random_state=42, n_init=10).fit(student_vectors)
         nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors)
         c_vectors, c_codes, c_names = build_course_vectors(catalog_data)
