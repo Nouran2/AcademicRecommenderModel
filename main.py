@@ -11,7 +11,7 @@ from trainer import perform_training
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
-app = FastAPI(title="Wanees Balanced Decision Engine", version="8.0.0")
+app = FastAPI(title="Wanees Balanced Decision Engine", version="8.5.0")
 
 class CourseRec(BaseModel):
     course_code: str; course_name: str; confidence: str; score: float 
@@ -34,7 +34,7 @@ async def startup_event():
     global engine
     if not os.path.exists(MODEL_PATH): perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH)
     if os.path.exists(MODEL_PATH):
-        try: engine = WanisEngine(MODEL_PATH); logger.info(" Balanced Engine Live.")
+        try: engine = WanisEngine(MODEL_PATH); logger.info("✅ Balanced Engine Live.")
         except Exception as e: logger.error(f"Startup Error: {e}")
 
 @app.get("/health")
@@ -49,51 +49,66 @@ async def recommend(student_id: str):
         async with engine_lock: return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
     try:
-        # المحاولة الأولى: الاستدعاء الكلاسيكي عبر الـ Path
+        # 1️⃣ المحاولة الأولى: الاستدعاء عبر الـ Path
         url = f"{BASE_URL}/v1/api/ai/student/{clean_id}/grades"
         resp = await http_client.get(url, headers={"X-AI-API-KEY": AI_API_KEY})
         
-        #  المحاولة الثانية التلقائية: إذا رفض سيرفر الجامعة الـ Path وأعاد 400 (لغز قائمة المعرفات)
+        # 2️⃣ المحاولة الثانية: لو السيرفر رجع 400 بسبب شكل الـ Contract (قائمة المعرفات)
         if resp.status_code == 400:
-            logger.info(" Path failed with 400. Trying Query Parameter Array Contract...")
+            logger.info("⚠️ Path failed with 400. Trying Query Parameter Array Contract...")
             fallback_url = f"{BASE_URL}/v1/api/ai/student/grades"
-            resp = await http_client.get(fallback_url, headers={"X-API-KEY": AI_API_KEY}, params={"studentId": [clean_id]})
+            resp = await http_client.get(fallback_url, headers={"X-AI-API-KEY": AI_API_KEY}, params={"studentId": [clean_id]})
 
-        # معالجة الرد في حال النجاح
-        if resp.status_code == 200:
-            res_json = resp.json()
-            data = res_json.get("data", {})
-            
-            # إذا أعاد السيرفر قائمة طلاب بدلاً من كائن مفرد، نلتقط العنصر الأول
-            if isinstance(data, list) and len(data) > 0:
-                data = data[0]
+        # لو السيرفر رجع أي أيرور صريح (400 أو 404 أو 500)، بنرمي الأيرور الحقيقي والسبب فوراً
+        if resp.status_code != 200:
+            error_details = "Unknown University API Error"
+            try:
+                error_details = resp.json() # قراءة تفاصيل الأيرور العربي أو الإنجليزي من الباك إند
+            except:
+                error_details = resp.text
                 
-            # التحقق من وجود درجات حقيقية لتجنب تصفير المصفوفات
-            if "courseGrades" in data and data["courseGrades"]:
-                student_info = {"GPA": float(data.get("gpa", 0.0))}
-                student_info.update({k.upper(): v for k, v in data.get("courseGrades", {}).items()})
-                student_cache[clean_id] = student_info
-                async with engine_lock: 
-                    return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+            logger.error(f"❌ University API Error: Status {resp.status_code} - Details: {error_details}")
+            raise HTTPException(
+                status_code=resp.status_code, 
+                detail={"error": "University API Failure", "status_code": resp.status_code, "backend_response": error_details}
+            )
 
-        # 3️⃣ طبقة الحماية القصوى: تفعيل الـ Fallback الشيك في حال فشل العثور الإلزامي على الطالب
-        logger.error(f"🚨 University API rejected student data mapping. Status: {resp.status_code}. Activating Fail-Safe Cold Start.")
-        cat_resp = await http_client.get(f"{BASE_URL}/v1/api/ai/course/catalog", headers={"X-AI-API-KEY": AI_API_KEY})
-        cat = cat_resp.json().get("data", [])[:3] if cat_resp.status_code == 200 else []
+        # إذا نجح الـ Request (200 OK) بنبدأ نفحص الداتا
+        res_json = resp.json()
+        data = res_json.get("data", {})
         
-        return {
-            "status": "cold_start", 
-            "source": "catalog_fallback", 
-            "dominant_track": "General Computer Science", 
-            "track_confidence": "95.0%", 
-            "track_reasoning": "Student record structural mismatch or uncommitted grades. Rendering core foundational curriculum.", 
-            "recommendations": [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100.0%", "score": 1.0} for c in cat]
-        }
+        if isinstance(data, list) and len(data) > 0:
+            data = data[0]
 
+        # 🔥 الشرط اللي طلبتيه بالظبط: الكولد ستارت يشتغل فقططط لو الطالب موجود بس الـ courseGrades بتاعته فاضية تماماً!
+        if not data or "courseGrades" not in data or not data["courseGrades"]:
+            logger.info("⚠️ Student found but courseGrades is empty. Activating Academic Cold Start.")
+            cat_resp = await http_client.get(f"{BASE_URL}/v1/api/ai/course/catalog", headers={"X-AI-API-KEY": AI_API_KEY})
+            cat = cat_resp.json().get("data", [])[:3] if cat_resp.status_code == 200 else []
+            
+            return {
+                "status": "cold_start", 
+                "source": "catalog_fallback", 
+                "dominant_track": "General Computer Science", 
+                "track_confidence": "95.0%", 
+                "track_reasoning": "Student record contains zero completed credit hours. Rendering introductory course catalog.", 
+                "recommendations": [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100.0%", "score": 1.0} for c in cat]
+            }
+
+        # لو الطالب عنده درجات، كمل الحسابات الطبيعية
+        student_info = {"GPA": float(data.get("gpa", 0.0))}
+        student_info.update({k.upper(): v for k, v in data.get("courseGrades", {}).items()})
+        student_cache[clean_id] = student_info
+        
+        async with engine_lock: 
+            return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+
+    except HTTPException as http_ex:
+        # إعادة توجيه الـ HTTPException الصريحة اللي إحنا رميناها فوق عشان تظهر في الـ Response بدقة
+        raise http_ex
     except Exception as e: 
-        logger.error(f"API Strategy Critical Failure: {e}")
-        
-    raise HTTPException(status_code=503, detail="University API Issue")
+        logger.error(f"Critical AI Engine Failure: {e}")
+        raise HTTPException(status_code=500, detail={"error": "Internal AI Engine Crash", "message": str(e)})
 
 @app.post("/retrain")
 async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(...)):
