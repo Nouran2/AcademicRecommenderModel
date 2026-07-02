@@ -33,15 +33,22 @@ engine_lock = asyncio.Lock()
 @app.on_event("startup")
 async def startup_event():
     global engine
-    if not os.path.exists(MODEL_PATH): 
-        perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH)
-    if os.path.exists(MODEL_PATH):
-        try: 
+    try:
+        logger.info("🚀 Startup: Checking model existence...")
+        if not os.path.exists(MODEL_PATH): 
+            logger.info("⚠️ Model file not found! Initiating first-time training at startup...")
+            success = perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH)
+            logger.info(f"📊 Startup Training Result = {success}")
+            
+        if os.path.exists(MODEL_PATH):
+            logger.info("⚙️ Loading Engine artifacts into memory...")
             engine = WanisEngine(MODEL_PATH)
-            logger.info("✅ Balanced Engine Live.")
-        except Exception as e: 
-            logger.error(f"Startup Error: {e}")
-
+            logger.info("✅ Engine Loaded Successfully at startup.")
+        else:
+            logger.error("❌ Model file still missing after startup training attempt.")
+    except Exception:
+        logger.exception("💥 Critical Failure during Startup Event")
+        
 @app.get("/health")
 def health(): return {"status": "active", "model_loaded": engine is not None}
 
@@ -110,10 +117,32 @@ async def recommend(student_id: str):
 
 @app.post("/retrain")
 async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(...)):
-    if x_admin_key != ADMIN_KEY: raise HTTPException(status_code=403)
+    if x_admin_key != ADMIN_KEY: 
+        raise HTTPException(status_code=403, detail="Invalid Admin Key")
+        
     async def retrain_safe():
         global engine
-        if perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH):
-            engine = WanisEngine(MODEL_PATH); student_cache.clear()
+        try:
+            logger.info("⏳ Background Task: Retraining started...")
+            
+            success = perform_training(
+                f"{BASE_URL}/v1/api/ai/analytics/dump",
+                MODEL_PATH
+            )
+            
+            logger.info(f"📊 Background Task: Training Result = {success}")
+            
+            if success:
+                logger.info("⚙️ Loading New Engine artifacts...")
+                engine = WanisEngine(MODEL_PATH)
+                logger.info("✅ Engine Loaded Successfully and Live!")
+                student_cache.clear()
+                logger.info("🧹 Student Cache Cleared.")
+            else:
+                logger.error("❌ perform_training returned False inside Background Task.")
+                
+        except Exception:
+            logger.exception("💥 Retraining Failed Inside Background Task")
+
     background_tasks.add_task(retrain_safe)
-    return {"message": "Retraining started."}
+    return {"message": "Retraining started in background."}
