@@ -66,8 +66,21 @@ class WanisEngine:
 
     def get_recommendation(self, student_dict):
         try:
-            clean = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
-            gpa = float(student_dict.get("GPA", 0.0))
+            # 🛡️ بوابه الحماية والفحص الصريحة (Data Guard Layer)
+            import json
+            if isinstance(student_dict, str):
+                try:
+                    student_dict = json.loads(student_dict)
+                except Exception as json_err:
+                    logger.error(f"JSON Parsing Error inside Engine: {json_err}")
+                    return {"error": "Invalid data format sent to engine"}
+
+            # تأمين قراءة قاموس الطالب بأمان كامل بعد الفحص
+            clean = {}
+            if isinstance(student_dict, dict):
+                clean = {str(k).upper(): v for k, v in student_dict.items() if str(k).upper() != "GPA"}
+            
+            gpa = float(student_dict.get("GPA", 0.0)) if isinstance(student_dict, dict) else 0.0
             dominant_track, track_conf, track_scores = self._predict_track(clean)
 
             # 1. بناء متجه الطالب الـ 6D Scaled وتحويله لـ 7D
@@ -106,21 +119,21 @@ class WanisEngine:
                     "category": code[:2] # إضافة التصنيف المطلوب
                 })
 
-            # 4.  Category-balanced selection (الحل النهائي للتنوع)
+            # 4. Category-balanced selection (الحل النهائي للتنوع)
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
             
             final = []
             used_categories = set()
             track_prefix_short = target_prefix[:2] # SWE -> SW, IS -> IS
 
-            #  اختيار مادة من نفس التراك أولاً
+            # اختيار مادة من نفس التراك أولاً
             for r in sorted_recs:
                 if r["course_code"].startswith(track_prefix_short):
                     final.append(r)
                     used_categories.add(r["course_code"][:2])
                     break
 
-            #  اختيار باقي المواد من تصنيفات مختلفة
+            # اختيار باقي المواد من تصنيفات مختلفة
             for r in sorted_recs:
                 cat = r["course_code"][:2]
                 if cat not in used_categories:
