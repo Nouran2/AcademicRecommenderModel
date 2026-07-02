@@ -1,150 +1,75 @@
-import joblib
-import numpy as np
+import os
 import logging
-import re
-from sklearn.metrics.pairwise import cosine_similarity
+import httpx
+import asyncio
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+from typing import List, Optional
+from pydantic import BaseModel
+from cachetools import TTLCache
+from recommender import WanisEngine
+from trainer import perform_training
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("wanees")
+app = FastAPI(title="Wanees Balanced Decision Engine", version="8.0.0")
 
-class WanisEngine:
-    def __init__(self, model_path):
-        self.artifacts = joblib.load(model_path)
-        self.nn_model = self.artifacts["nn_model"]
-        self.scaler = self.artifacts["scaler"]
-        self.student_vectors = self.artifacts["student_vectors"]
-        self.course_vectors = self.artifacts["course_vectors"] # (N, 7D)
-        self.course_codes = self.artifacts["course_codes"]
-        self.course_names = self.artifacts["course_names"]
-        self.track_names = self.artifacts["track_names"]
-        
-        # خريطة البادئات لضمان دقة الاختيار
-        self.track_to_prefix = {
-            "Software Engineering": "SWE", "Computer Science": "CS",
-            "Artificial Intelligence": "AI", "Bioinformatics": "BI",
-            "Information Technology": "IT", "Information Systems": "IS"
-        }
+class CourseRec(BaseModel):
+    course_code: str; course_name: str; confidence: str; score: float 
 
-    def _extract_level(self, code):
-        match = re.search(r'\d', code)
-        return int(match.group()) if match else 1
+class RecResponse(BaseModel):
+    status: str; source: str; dominant_track: str; track_confidence: str; track_reasoning: str; recommendations: List[CourseRec]
 
-    def _sigmoid(self, x): return 1 / (1 + np.exp(-x))
+BASE_URL = "https://rafeek-live.runasp.net"
+AI_API_KEY = os.getenv("AI_API_KEY")
+ADMIN_KEY = os.getenv("ADMIN_KEY")
+MODEL_PATH = "wanees_model.pkl"
 
-    def _softmax(self, scores, temperature=2.0):
-        z = np.array(scores) / temperature
-        exp_z = np.exp(z - np.max(z))
-        return exp_z / exp_z.sum()
+student_cache = TTLCache(maxsize=1000, ttl=600)
+# استخدام رقم واحد للتايم أوت لضمان عدم حدوث ValueError
+http_client = httpx.AsyncClient(timeout=15.0)
+engine: Optional[WanisEngine] = None
+engine_lock = asyncio.Lock()
 
-    def _predict_track(self, clean_dict):
-        """الطبقة الأولى: تصنيف التراك ومعايرة الثقة (Calibration Layer)"""
-        prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], 
-                      "Bioinformatics": ["BIO", "BI"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
-        
-        track_scores = []
-        for t in self.track_names:
-            prefixes = prefix_map.get(t, [])
-            vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
-            if vals:
-                mean_v, count = np.mean(vals), len(vals)
-                var = np.var(vals) if count > 1 else 50
-                # Weighted Score مع عقوبة التذبذب واللوغاريتم
-                track_scores.append(mean_v * np.log1p(count) * (1 / (1 + np.sqrt(var)/100)))
-            else:
-                track_scores.append(0.001)
+@app.on_event("startup")
+async def startup_event():
+    global engine
+    if not os.path.exists(MODEL_PATH): perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH)
+    if os.path.exists(MODEL_PATH):
+        try: engine = WanisEngine(MODEL_PATH); logger.info("✅ Balanced Engine Live.")
+        except Exception as e: logger.error(f"Startup Error: {e}")
 
-        probs = self._softmax(track_scores)
-        idx = np.argmax(probs)
-        
-        # معايرة الفجوة (Sigmoid Calibration) لمنع الغرور الرقمي
-        sorted_p = sorted(probs, reverse=True)
-        gap = sorted_p[0] - sorted_p[1] if len(sorted_p) > 1 else sorted_p[0]
-        conf = round(min(self._sigmoid(gap * 8 - 2) * 100, 96.5), 1)
-        
-        return self.track_names[idx], conf, track_scores
+@app.get("/health")
+def health(): return {"status": "active", "model_loaded": engine is not None}
 
-    def get_recommendation(self, student_dict):
-        try:
-            clean = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
-            gpa = float(student_dict.get("GPA", 0.0))
-            dominant_track, track_conf, track_scores = self._predict_track(clean)
+@app.get("/recommend/{student_id}", response_model=RecResponse)
+async def recommend(student_id: str):
+    if engine is None: raise HTTPException(status_code=503, detail="Engine loading...")
+    clean_id = student_id.strip()
+    if clean_id in student_cache:
+        async with engine_lock: return {"status": "success", "source": "cache", **engine.get_recommendation(student_cache[clean_id])}
 
-            # 1. بناء متجه الطالب الـ 6D Scaled وتحويله لـ 7D
-            track_vec_6d = self.scaler.transform(np.array(track_scores).reshape(1, -1))
-            neighbors = self.nn_model.kneighbors(track_vec_6d)[1][0][1:]
-            neighbor_mean_6d = self.student_vectors[neighbors].mean(axis=0)
+    try:
+        url = f"{BASE_URL}/v1/api/ai/student/{clean_id}/grades"
+        resp = await http_client.get(url, headers={"X-AI-API-KEY": AI_API_KEY})
+        if resp.status_code == 200:
+            data = resp.json().get("data", {})
+            student_info = {"GPA": float(data.get("gpa", 0.0))}
+            student_info.update({k.upper(): v for k, v in data.get("courseGrades", {}).items()})
+            student_cache[clean_id] = student_info
+            async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
+        elif resp.status_code in [400, 404]:
+            cat = (await http_client.get(f"{BASE_URL}/v1/api/ai/course/catalog", headers={"X-AI-API-KEY": AI_API_KEY})).json().get("data", [])[:3]
+            return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "95%", "track_reasoning": "Welcome!", 
+                    "recommendations": [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100%", "score": 1.0} for c in cat]}
+    except Exception as e: logger.error(f"API Error: {e}")
+    raise HTTPException(status_code=503, detail="University API Issue")
 
-            current_lvl = max([self._extract_level(c) for c in clean.keys()]) if clean else 1
-            level_feat = current_lvl / 4.0
-            student_7d = np.append(track_vec_6d, level_feat).reshape(1, -1)
-            neighbor_7d = np.append(neighbor_mean_6d, level_feat).reshape(1, -1)
-
-            # 2. حساب التشابه (Ranking)
-            sim_content = cosine_similarity(student_7d, self.course_vectors)[0]
-            sim_collab = cosine_similarity(neighbor_7d, self.course_vectors)[0]
-
-            # 3. بناء قائمة المواد مع الـ Constraints
-            recs = []
-            allowed_levels = [current_lvl, current_lvl + 1]
-            target_prefix = self.track_to_prefix.get(dominant_track, "NONE")
-
-            for i, code in enumerate(self.course_codes):
-                if code in clean: continue
-                if self._extract_level(code) not in allowed_levels: continue
-
-                base_score = (0.45 * sim_content[i]) + (0.30 * sim_collab[i]) + (0.25 * (gpa/4.0))
-
-                # Hard Track Boost
-                if code.startswith(target_prefix): base_score *= 1.3
-                else: base_score *= 0.7
-
-                recs.append({
-                    "course_code": code, 
-                    "course_name": self.course_names[i], 
-                    "score": base_score, 
-                    "category": code[:2]
-                })
-
-            # 4. Category-balanced selection (نسخة مبسطة ومحسنة تمنع التكرار)
-            sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
-            
-            final = []
-            used_categories = set()
-
-            for r in sorted_recs:
-                cat = r["course_code"][:2]
-                if cat not in used_categories:
-                    final.append(r)
-                    used_categories.add(cat)
-                if len(final) == 3: break
-
-            #  5. الـ Fail-safe لضمان استقرار الرد في حالة عدم وجود مواد مرشحة
-            if not final:
-                return {
-                    "dominant_track": dominant_track,
-                    "track_confidence": f"{track_conf}%",
-                    "track_reasoning": f"Balanced academic mapping for {dominant_track}.",
-                    "recommendations": []
-                }
-
-            # 6. Relative Score Normalization (تحويل الـ Scores إلى نسب مقارنة بأفضل مادة)
-            formatted_recommendations = []
-            max_s = final[0]["score"] if final[0]["score"] > 0 else 1.0
-
-            for r in final:
-                confidence = round((r["score"] / max_s) * 100, 1)
-
-                formatted_recommendations.append({
-                    "course_code": r["course_code"],
-                    "course_name": r["course_name"],
-                    "confidence": f"{confidence}%",
-                    "score": round(r["score"], 4)
-                })
-
-            return {
-                "dominant_track": dominant_track,
-                "track_confidence": f"{track_conf}%",
-                "track_reasoning": f"Balanced academic mapping for {dominant_track}.",
-                "recommendations": formatted_recommendations
-            }
-        except Exception as e:
-            logger.error(f"Engine Crash: {e}"); return {"error": str(e)}
+@app.post("/retrain")
+async def retrain(background_tasks: BackgroundTasks, x_admin_key: str = Header(...)):
+    if x_admin_key != ADMIN_KEY: raise HTTPException(status_code=403)
+    async def retrain_safe():
+        global engine
+        if perform_training(f"{BASE_URL}/v1/api/ai/analytics/dump", MODEL_PATH):
+            engine = WanisEngine(MODEL_PATH); student_cache.clear()
+    background_tasks.add_task(retrain_safe)
+    return {"message": "Retraining started."}
