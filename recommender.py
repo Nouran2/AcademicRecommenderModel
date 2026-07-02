@@ -35,19 +35,26 @@ class WanisEngine:
         return exp_z / exp_z.sum()
 
     def _predict_track(self, clean_dict):
+        """الطبقة الأولى: تصنيف التراك ومعايرة الثقة (Calibration Layer)"""
         prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], 
                       "Bioinformatics": ["BIO", "BI"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
         
         track_scores = []
         for t in self.track_names:
             prefixes = prefix_map.get(t, [])
-            vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
+            vals = [clean_dict[c] for c in clean_dict if any(str(c).startswith(p) for p in prefixes)]
             if vals:
                 mean_v, count = np.mean(vals), len(vals)
                 var = np.var(vals) if count > 1 else 50
                 track_scores.append(mean_v * np.log1p(count) * (1 / (1 + np.sqrt(var)/100)))
             else:
-                track_scores.append(0.001)
+                # 🛡️ حماية فورية: لو ملقاش مواد للتراك، بياخد متوسط درجات الطالب الكلية لمنع المصفوفات الصفرية
+                all_vals = list(clean_dict.values())
+                track_scores.append(np.mean(all_vals) if all_vals else 0.001)
+
+        # 🛡️ تأمين إضافي: لو لسبب ما المصفوفة طلعت فاضية تماماً، بنملاها بقيم أساسية متنوعة لمنع انهيار الأبعاد
+        if not track_scores or len(track_scores) == 0:
+            track_scores = [75.0, 70.0, 65.0, 60.0, 55.0, 50.0]
 
         probs = self._softmax(track_scores)
         idx = np.argmax(probs)
@@ -68,9 +75,18 @@ class WanisEngine:
             gpa = float(student_dict.get("GPA", 0.0))
             dominant_track, track_conf, track_scores = self._predict_track(clean)
 
-            track_vec_6d = self.scaler.transform(np.array(track_scores).reshape(1, -1))
-            neighbors = self.nn_model.kneighbors(track_vec_6d)[1][0][1:]
-            neighbor_mean_6d = self.student_vectors[neighbors].mean(axis=0)
+            # 🛡️ إجبار وتحصين الـ track_scores إلى 2D Array صريح لتفادي خطأ Scikit-Learn الشهير
+            scores_array = np.array(track_scores, dtype=np.float64).reshape(1, -1)
+            track_vec_6d = self.scaler.transform(scores_array)
+            
+            total_samples = self.student_vectors.shape[0]
+            available_neighbors = min(6, total_samples)
+            
+            if available_neighbors > 1:
+                neighbors = self.nn_model.kneighbors(track_vec_6d, n_neighbors=available_neighbors)[1][0][1:]
+                neighbor_mean_6d = self.student_vectors[neighbors].mean(axis=0)
+            else:
+                neighbor_mean_6d = self.student_vectors[0]
 
             current_lvl = max([self._extract_level(c) for c in clean.keys()]) if clean else 1
             level_feat = current_lvl / 4.0
@@ -109,14 +125,12 @@ class WanisEngine:
                     used_categories.add(cat)
                 if len(final) == 3: break
 
-            # 🔥 الـ Fail-safe لضمان المتانة والأمان
             if not final:
                 return {
                     "dominant_track": dominant_track, "track_confidence": f"{track_conf}%",
                     "track_reasoning": f"Balanced academic mapping for {dominant_track}.", "recommendations": []
                 }
 
-            # 🔥 خطوة الـ Relative Score Normalization النظيفة
             formatted_recommendations = []
             max_s = final[0]["score"] if final[0]["score"] > 0 else 1.0
 
