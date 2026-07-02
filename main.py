@@ -38,6 +38,9 @@ async def startup_event():
         try: engine = WanisEngine(MODEL_PATH); logger.info("✅ Balanced Engine Live.")
         except Exception as e: logger.error(f"Startup Error: {e}")
 
+@app.get("/")
+def root(): return {"service": "Wanees Balanced Decision Engine", "status": "active", "model_loaded": engine is not None}
+
 @app.get("/health")
 def health(): return {"status": "active", "model_loaded": engine is not None}
 
@@ -58,7 +61,8 @@ async def recommend(student_id: str):
             student_cache[clean_id] = student_info
             async with engine_lock: return {"status": "success", "source": "university_api", **engine.get_recommendation(student_info)}
         elif resp.status_code in [400, 404]:
-            cat = (await http_client.get(f"{BASE_URL}/v1/api/ai/course/catalog", headers={"X-AI-API-KEY": AI_API_KEY})).json().get("data", [])[:3]
+            cat_data = (await http_client.get(f"{BASE_URL}/v1/api/ai/course/catalog", headers={"X-AI-API-KEY": AI_API_KEY})).json().get("data", [])
+            cat = (cat_data.get("items", []) if isinstance(cat_data, dict) else cat_data)[:3]
             return {"status": "cold_start", "source": "catalog", "dominant_track": "General", "track_confidence": "95%", "track_reasoning": "Welcome!", 
                     "recommendations": [{"course_code": c.get("code"), "course_name": c.get("title"), "confidence": "100%", "score": 1.0} for c in cat]}
     except Exception as e: logger.error(f"API Error: {e}")
