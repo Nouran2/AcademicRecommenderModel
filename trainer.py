@@ -23,12 +23,27 @@ def build_course_vectors(catalog_data):
         codes.append(code); names.append(c.get("title", "Unknown"))
     return np.array(vectors), codes, names
 
+def _extract_list(json_resp):
+    """
+    يتعامل مع شكلين محتملين للرد من الـ API:
+    1) {"data": [ ... ]}                 -> ليست مباشرة
+    2) {"data": {"items": [ ... ]}}      -> ليست جوه مفتاح items (Pagination)
+    ده بيمنع الخطأ 'str' object has no attribute 'get' اللي كان بيحصل
+    لما كان الكود بيعمل loop على مفاتيح الـ dict بدل عناصر الليست.
+    """
+    data = json_resp.get("data", [])
+    if isinstance(data, dict):
+        return data.get("items", [])
+    if isinstance(data, list):
+        return data
+    return []
+
 def perform_training(data_url, model_path="wanees_model.pkl"):
     api_key = os.getenv("AI_API_KEY"); headers = {"X-AI-API-KEY": api_key}
     try:
         with httpx.Client(timeout=60.0) as client:
-            raw_students = client.get(data_url, headers=headers).json().get("data", [])
-            catalog_data = client.get("https://rafeek-live.runasp.net/v1/api/ai/course/catalog", headers=headers).json().get("data", [])
+            raw_students = _extract_list(client.get(data_url, headers=headers).json())
+            catalog_data = _extract_list(client.get("https://rafeek-live.runasp.net/v1/api/ai/course/catalog", headers=headers).json())
         if not raw_students or not catalog_data: return False
         df = pd.DataFrame([{"GPA": s.get("gpa", 0.0), **{k.upper(): v for k, v in s.get("courseGrades", {}).items()}} for s in raw_students]).fillna(0)
         prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], "Bioinformatics": ["BIO"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
