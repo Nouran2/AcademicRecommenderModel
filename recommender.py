@@ -66,21 +66,8 @@ class WanisEngine:
 
     def get_recommendation(self, student_dict):
         try:
-            # 🛡️ بوابه الحماية والفحص الصريحة (Data Guard Layer)
-            import json
-            if isinstance(student_dict, str):
-                try:
-                    student_dict = json.loads(student_dict)
-                except Exception as json_err:
-                    logger.error(f"JSON Parsing Error inside Engine: {json_err}")
-                    return {"error": "Invalid data format sent to engine"}
-
-            # تأمين قراءة قاموس الطالب بأمان كامل بعد الفحص
-            clean = {}
-            if isinstance(student_dict, dict):
-                clean = {str(k).upper(): v for k, v in student_dict.items() if str(k).upper() != "GPA"}
-            
-            gpa = float(student_dict.get("GPA", 0.0)) if isinstance(student_dict, dict) else 0.0
+            clean = {k.upper(): v for k, v in student_dict.items() if k != "GPA"}
+            gpa = float(student_dict.get("GPA", 0.0))
             dominant_track, track_conf, track_scores = self._predict_track(clean)
 
             # 1. بناء متجه الطالب الـ 6D Scaled وتحويله لـ 7D
@@ -120,20 +107,14 @@ class WanisEngine:
                 })
 
             # 4. Category-balanced selection (الحل النهائي للتنوع)
+            # ملاحظة: الأفضلية للتراك السائد متحققة بالفعل عبر الـ Hard Track Boost
+            # في السكور فوق (base_score *= 1.3/0.7)، فمافيش داعي لتكرار نفس المنطق
+            # بلوب تاني بيفرض مادة من نفس التراك يدويًا - ده كان تكرار للوظيفة نفسها.
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
-            
+
             final = []
             used_categories = set()
-            track_prefix_short = target_prefix[:2] # SWE -> SW, IS -> IS
 
-            # اختيار مادة من نفس التراك أولاً
-            for r in sorted_recs:
-                if r["course_code"].startswith(track_prefix_short):
-                    final.append(r)
-                    used_categories.add(r["course_code"][:2])
-                    break
-
-            # اختيار باقي المواد من تصنيفات مختلفة
             for r in sorted_recs:
                 cat = r["course_code"][:2]
                 if cat not in used_categories:
@@ -142,13 +123,25 @@ class WanisEngine:
                 if len(final) == 3: break
 
             # 5. التنسيق النهائي للرد
-            max_s = final[0]["score"] if final else 1
+            # Relative Score Normalization (Min-Max) بدل القسمة على أعلى سكور بس:
+            # كده كل مادة بتتحسب نسبتها بالنسبة لمدى (range) السكورز الفعلي في
+            # القائمة النهائية (أقل سكور = 0%, أعلى سكور = 100%)، فالفروق بين
+            # المواد بتبقى واضحة وحقيقية بدل ما كل حاجة تتزنق قريبة من 100%.
+            scores = [r["score"] for r in final]
+            min_s, max_s = (min(scores), max(scores)) if scores else (0.0, 1.0)
+            score_range = max_s - min_s
+
+            def relative_confidence(score):
+                if score_range == 0:
+                    return 100.0
+                return round(((score - min_s) / score_range) * 100, 1)
+
             return {
                 "dominant_track": dominant_track,
                 "track_confidence": f"{track_conf}%",
                 "track_reasoning": f"Balanced academic mapping for {dominant_track}.",
                 "recommendations": [{"course_code": r["course_code"], "course_name": r["course_name"], 
-                                     "confidence": f"{round((r['score']/max_s)*100, 1)}%", "score": round(r["score"], 4)} for r in final]
+                                     "confidence": f"{relative_confidence(r['score'])}%", "score": round(r["score"], 4)} for r in final]
             }
         except Exception as e:
             logger.error(f"Engine Crash: {e}"); return {"error": str(e)}
