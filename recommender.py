@@ -117,21 +117,28 @@ class WanisEngine:
                     used_categories.add(cat)
                 if len(final) == 3: break
 
-            #  5. Relative Score Normalization (تحويل الـ Scores إلى نسب مقارنة بأفضل مادة)
+            #  5. الـ Fail-safe لضمان استقرار الرد في حالة عدم وجود مواد مرشحة
+            if not final:
+                return {
+                    "dominant_track": dominant_track,
+                    "track_confidence": f"{track_conf}%",
+                    "track_reasoning": f"Balanced academic mapping for {dominant_track}.",
+                    "recommendations": []
+                }
+
+            # 6. Relative Score Normalization (تحويل الـ Scores إلى نسب مقارنة بأفضل مادة)
             formatted_recommendations = []
+            max_s = final[0]["score"] if final[0]["score"] > 0 else 1.0
 
-            if final:
-                max_s = final[0]["score"] if final[0]["score"] > 0 else 1.0
+            for r in final:
+                confidence = round((r["score"] / max_s) * 100, 1)
 
-                for r in final:
-                    confidence = round((r["score"] / max_s) * 100, 1)
-
-                    formatted_recommendations.append({
-                        "course_code": r["course_code"],
-                        "course_name": r["course_name"],
-                        "confidence": f"{confidence}%",
-                        "score": round(r["score"], 4)
-                    })
+                formatted_recommendations.append({
+                    "course_code": r["course_code"],
+                    "course_name": r["course_name"],
+                    "confidence": f"{confidence}%",
+                    "score": round(r["score"], 4)
+                })
 
             return {
                 "dominant_track": dominant_track,
