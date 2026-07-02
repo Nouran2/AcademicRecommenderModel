@@ -123,12 +123,14 @@ class WanisEngine:
                 if len(final) == 3: break
 
             # 5. التنسيق النهائي للرد
-            # Relative Score Normalization (Min-Max) بدل القسمة على أعلى سكور بس:
-            # كده كل مادة بتتحسب نسبتها بالنسبة لمدى (range) السكورز الفعلي في
-            # القائمة النهائية (أقل سكور = 0%, أعلى سكور = 100%)، فالفروق بين
-            # المواد بتبقى واضحة وحقيقية بدل ما كل حاجة تتزنق قريبة من 100%.
-            scores = [r["score"] for r in final]
-            min_s, max_s = (min(scores), max(scores)) if scores else (0.0, 1.0)
+            # Relative Score Normalization (Min-Max) بالنسبة لكل المواد المرشحة
+            # (sorted_recs) مش بس التلاتة اللي هترجع في الرد. لو حسبناها على
+            # الـ 3 المختارين بس، أي مادتين متقاربين في السكور هيبان واحدة منهم
+            # 0% حتى لو هي فعليًا مادة كويسة - وده مش منطقي لمادة بترشحها فعلاً.
+            # حساب الـ range على كل المرشحين بيدي صورة واقعية لمكان كل مادة
+            # فعليًا بالنسبة للمجموعة الكاملة.
+            all_scores = [r["score"] for r in sorted_recs]
+            min_s, max_s = (min(all_scores), max(all_scores)) if all_scores else (0.0, 1.0)
             score_range = max_s - min_s
 
             def relative_confidence(score):
