@@ -80,7 +80,7 @@ class WanisEngine:
             student_7d = np.append(track_vec_6d, level_feat).reshape(1, -1)
             neighbor_7d = np.append(neighbor_mean_6d, level_feat).reshape(1, -1)
 
-            # 2. حساب التشافه (Ranking)
+            # 2. حساب التشابه (Ranking)
             sim_content = cosine_similarity(student_7d, self.course_vectors)[0]
             sim_collab = cosine_similarity(neighbor_7d, self.course_vectors)[0]
 
@@ -106,21 +106,13 @@ class WanisEngine:
                     "category": code[:2]
                 })
 
-            # 4. Category-balanced selection (الحل النهائي للتنوع)
+            # 🔥 4. Category-balanced selection (نسخة مبسطة ومحسنة تمنع التكرار)
+            # الترتيب يعتمد بالكامل على الـ Boost الرياضي، والـ Loop تجمع التصنيفات المختلفة مباشرة
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
             
             final = []
             used_categories = set()
-            track_prefix_short = target_prefix[:2]
 
-            # اختيار مادة من نفس التراك أولاً
-            for r in sorted_recs:
-                if r["course_code"].startswith(track_prefix_short):
-                    final.append(r)
-                    used_categories.add(r["course_code"][:2])
-                    break
-
-            # اختيار باقي المواد من تصنيفات مختلفة
             for r in sorted_recs:
                 cat = r["course_code"][:2]
                 if cat not in used_categories:
@@ -128,7 +120,7 @@ class WanisEngine:
                     used_categories.add(cat)
                 if len(final) == 3: break
 
-            # 🔥 5. التنسيق المطور لحساب الـ Confidence الديناميكي الفردي لمنع الثبات الرقمي
+            # 5. التنسيق المطور لحساب الـ Confidence الديناميكي الفردي لمنع الثبات الرقمي
             formatted_recommendations = []
             if final:
                 max_s = final[0]["score"]
