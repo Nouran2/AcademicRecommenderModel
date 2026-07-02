@@ -9,7 +9,6 @@ logger = logging.getLogger("wanees")
 class WanisEngine:
     def __init__(self, model_path):
         self.artifacts = joblib.load(model_path)
-        self.kmeans = self.artifacts["kmeans"]
         self.nn_model = self.artifacts["nn_model"]
         self.scaler = self.artifacts["scaler"]
         self.student_vectors = self.artifacts["student_vectors"]
@@ -41,7 +40,7 @@ class WanisEngine:
         prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], 
                       "Bioinformatics": ["BIO", "BI"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
         
-        track_scores, track_counts = [], []
+        track_scores = []
         for t in self.track_names:
             prefixes = prefix_map.get(t, [])
             vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
@@ -50,9 +49,8 @@ class WanisEngine:
                 var = np.var(vals) if count > 1 else 50
                 # Weighted Score مع عقوبة التذبذب واللوغاريتم
                 track_scores.append(mean_v * np.log1p(count) * (1 / (1 + np.sqrt(var)/100)))
-                track_counts.append(count)
             else:
-                track_scores.append(0.001); track_counts.append(0)
+                track_scores.append(0.001)
 
         probs = self._softmax(track_scores)
         idx = np.argmax(probs)
@@ -106,8 +104,7 @@ class WanisEngine:
                     "category": code[:2]
                 })
 
-            # 🔥 4. Category-balanced selection (نسخة مبسطة ومحسنة تمنع التكرار)
-            # الترتيب يعتمد بالكامل على الـ Boost الرياضي، والـ Loop تجمع التصنيفات المختلفة مباشرة
+            # 4. Category-balanced selection (نسخة مبسطة ومحسنة تمنع التكرار)
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
             
             final = []
@@ -120,27 +117,19 @@ class WanisEngine:
                     used_categories.add(cat)
                 if len(final) == 3: break
 
-            # 5. التنسيق المطور لحساب الـ Confidence الديناميكي الفردي لمنع الثبات الرقمي
+            #  5. Relative Score Normalization (تحويل الـ Scores إلى نسب مقارنة بأفضل مادة)
             formatted_recommendations = []
+
             if final:
-                max_s = final[0]["score"]
-                min_s = final[-1]["score"]
-                score_range = max_s - min_s if max_s - min_s > 0 else 1.0
-                
-                for idx, r in enumerate(final):
-                    if idx == 0:
-                        conf_str = "100.0%"
-                    else:
-                        # Min-Max normalization لتوليد نسب مخصصة تعكس الفروق الحقيقية الفردية
-                        base_ratio = 100.0 - ((max_s - r["score"]) / score_range * 40.0)
-                        # إضافة اهتزاز طفيف مشتق من الـ GPA لكسر التماثل تماماً بين الطلاب
-                        gpa_shift = (gpa * 1.77) % 2.5
-                        conf_str = f"{round(base_ratio - gpa_shift, 1)}%"
-                    
+                max_s = final[0]["score"] if final[0]["score"] > 0 else 1.0
+
+                for r in final:
+                    confidence = round((r["score"] / max_s) * 100, 1)
+
                     formatted_recommendations.append({
                         "course_code": r["course_code"],
                         "course_name": r["course_name"],
-                        "confidence": conf_str,
+                        "confidence": f"{confidence}%",
                         "score": round(r["score"], 4)
                     })
 
