@@ -6,10 +6,54 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger("wanees")
 
+# خريطة البادئات الموحّدة لكل تراك - مصدر واحد للحقيقة (Single Source of Truth).
+# نفس الخريطة دي بيستوردها trainer.py عشان يبني الـ student_vectors وقت التدريب
+# بنفس المعادلة اللي بتُستخدم هنا وقت الاستدلال.
+TRACK_PREFIX_MAP = {
+    "Software Engineering": ["SWE"],
+    "Computer Science": ["CS"],
+    "Artificial Intelligence": ["AI"],
+    "Bioinformatics": ["BIO", "BI"],
+    "Information Technology": ["IT"],
+    "Information Systems": ["IS"],
+}
+
+
+def compute_track_scores(grades_dict, track_names=None, prefix_map=None):
+    """
+    يحسب سكور كل تراك لطالب واحد بالمعادلة:
+        Score_t = mean(grades_t) * log(1 + count_t) * [1 / (1 + sqrt(var_t) / 100)]
+
+    مهم جدًا: نفس الدالة دي بالظبط بتُستخدم فى مرحلتين مختلفتين:
+      1) trainer.py      -> وقت بناء student_vectors لتدريب NearestNeighbors.
+      2) WanisEngine._predict_track أسفل -> وقت حساب متجه الطالب الحالى (Inference).
+
+    قبل هذا التعديل كان trainer.py بيستخدم مجرد mean() بسيط (متوسط بيشمل
+    أصفار المواد اللي الطالب لم يدرسها)، بينما هنا كان بيتم استخدام المعادلة
+    الكاملة (log + variance dampener) على المواد المأخوذة فعليًا فقط. استخدام
+    نفس الدالة فى المكانين بيضمن Training/Inference Consistency الكاملة.
+
+    ملحوظة: لا يوجد أي Penalty معتمد على أقل درجة (Penalty_t) فى الكود.
+    """
+    prefix_map = prefix_map or TRACK_PREFIX_MAP
+    track_names = track_names or list(prefix_map.keys())
+
+    scores = []
+    for t in track_names:
+        prefixes = prefix_map.get(t, [])
+        vals = [v for c, v in grades_dict.items() if any(c.startswith(p) for p in prefixes)]
+        if vals:
+            mean_v, count = float(np.mean(vals)), len(vals)
+            var = np.var(vals) if count > 1 else 50.0
+            scores.append(mean_v * np.log1p(count) * (1 / (1 + np.sqrt(var) / 100)))
+        else:
+            scores.append(0.001)
+    return scores
+
+
 class WanisEngine:
     def __init__(self, model_path):
         self.artifacts = joblib.load(model_path)
-        self.kmeans = self.artifacts["kmeans"]
         self.nn_model = self.artifacts["nn_model"]
         self.scaler = self.artifacts["scaler"]
         self.student_vectors = self.artifacts["student_vectors"]
@@ -38,21 +82,9 @@ class WanisEngine:
 
     def _predict_track(self, clean_dict):
         """الطبقة الأولى: تصنيف التراك ومعايرة الثقة (Calibration Layer)"""
-        prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], 
-                      "Bioinformatics": ["BIO", "BI"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
-        
-        track_scores, track_counts = [], []
-        for t in self.track_names:
-            prefixes = prefix_map.get(t, [])
-            vals = [clean_dict[c] for c in clean_dict if any(c.startswith(p) for p in prefixes)]
-            if vals:
-                mean_v, count = np.mean(vals), len(vals)
-                var = np.var(vals) if count > 1 else 50
-                # Weighted Score مع عقوبة التذبذب واللوغاريتم
-                track_scores.append(mean_v * np.log1p(count) * (1 / (1 + np.sqrt(var)/100)))
-                track_counts.append(count)
-            else:
-                track_scores.append(0.001); track_counts.append(0)
+        # نفس دالة compute_track_scores المستخدمة وقت التدريب فى trainer.py
+        # (تم استيرادها من هذا الملف) لضمان تطابق معادلة الفيتشرز بين التدريب والاستدلال.
+        track_scores = compute_track_scores(clean_dict, self.track_names)
 
         probs = self._softmax(track_scores)
         idx = np.argmax(probs)
@@ -111,6 +143,14 @@ class WanisEngine:
             # في السكور فوق (base_score *= 1.3/0.7)، فمافيش داعي لتكرار نفس المنطق
             # بلوب تاني بيفرض مادة من نفس التراك يدويًا - ده كان تكرار للوظيفة نفسها.
             sorted_recs = sorted(recs, key=lambda x: x["score"], reverse=True)
+
+            # Debug: نطبع أفضل 10 مرشحين *قبل* خطوة التنويع، للتأكد إن ترتيب
+            # التراكات (مثلاً CS -> BIO -> IS) ناتج فعليًا عن الـ Hard Track Boost
+            # والـ scoring نفسه، وليس أثرًا جانبيًا لخطوة Category-Balanced Selection.
+            logger.debug(
+                "Top-10 ranked candidates before diversity filtering: %s",
+                [(r["course_code"], round(r["score"], 4)) for r in sorted_recs[:10]],
+            )
 
             final = []
             used_categories = set()
