@@ -6,6 +6,36 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger("wanees")
 
+# جدول قرب التراكات: لكل تراك سائد، ترتيب التراكات الأخرى من الأقرب أكاديميًا
+# للأبعد. بيُستخدم وقت اختيار المادة الثانية والثالثة (التنويع) بدل مجرد أخذ
+# أعلى سكور فى أي تصنيف جديد - كده التنويع بيحترم القرب الأكاديمي الحقيقي.
+RELATED_TRACKS = {
+    "Computer Science": [
+        "Software Engineering", "Artificial Intelligence",
+        "Information Technology", "Information Systems", "Bioinformatics",
+    ],
+    "Information Systems": [
+        "Information Technology", "Computer Science",
+        "Software Engineering", "Artificial Intelligence", "Bioinformatics",
+    ],
+    "Software Engineering": [
+        "Computer Science", "Artificial Intelligence",
+        "Information Technology", "Information Systems", "Bioinformatics",
+    ],
+    "Artificial Intelligence": [
+        "Computer Science", "Software Engineering",
+        "Information Systems", "Information Technology", "Bioinformatics",
+    ],
+    "Information Technology": [
+        "Information Systems", "Computer Science",
+        "Software Engineering", "Artificial Intelligence", "Bioinformatics",
+    ],
+    "Bioinformatics": [
+        "Computer Science", "Artificial Intelligence",
+        "Information Systems", "Information Technology", "Software Engineering",
+    ],
+}
+
 # خريطة البادئات الموحّدة لكل تراك - مصدر واحد للحقيقة (Single Source of Truth).
 # نفس الخريطة دي بيستوردها trainer.py عشان يبني الـ student_vectors وقت التدريب
 # بنفس المعادلة اللي بتُستخدم هنا وقت الاستدلال.
@@ -152,15 +182,47 @@ class WanisEngine:
                 [(r["course_code"], round(r["score"], 4)) for r in sorted_recs[:10]],
             )
 
+            # قيد جودة: التنويع دلوقتي بيعتمد على "جدول قرب التراكات"
+            # (RELATED_TRACKS) بدل مجرد أعلى سكور فى تصنيف جديد. أول مادة
+            # (الأعلى سكور عمومًا، وعادة من التراك السائد بفعل الـ Boost)
+            # بتضاف زي ما هي، وبعدين نمشي على ترتيب التراكات الأقرب أكاديميًا
+            # للتراك السائد ونختار أفضل مادة متاحة من كل تراك بالترتيب ده.
             final = []
             used_categories = set()
 
-            for r in sorted_recs:
-                cat = r["course_code"][:2]
-                if cat not in used_categories:
+            if sorted_recs:
+                top = sorted_recs[0]
+                final.append(top)
+                used_categories.add(top["course_code"][:2])
+
+            related_order = RELATED_TRACKS.get(
+                dominant_track, [t for t in self.track_names if t != dominant_track]
+            )
+
+            for related_track in related_order:
+                if len(final) == 3:
+                    break
+                cat = self.track_to_prefix.get(related_track, "")[:2]
+                if not cat or cat in used_categories:
+                    continue
+                # sorted_recs مرتبة أصلاً تنازليًا، فأول عنصر مطابق للتصنيف هو الأفضل فيه
+                best_in_cat = next((r for r in sorted_recs if r["course_code"][:2] == cat), None)
+                if best_in_cat:
+                    final.append(best_in_cat)
+                    used_categories.add(cat)
+
+            # احتياطى: لو لسه أقل من 3 توصيات (مثلاً تراك من الجدول مفيش له
+            # مواد متاحة أصلاً)، نكمل بالطريقة الافتراضية (أعلى سكور عام) على
+            # أي تصنيف لم يُستخدم بعد، لضمان استمرار وجود توصيات كافية.
+            if len(final) < 3:
+                for r in sorted_recs:
+                    if len(final) == 3:
+                        break
+                    cat = r["course_code"][:2]
+                    if cat in used_categories:
+                        continue
                     final.append(r)
                     used_categories.add(cat)
-                if len(final) == 3: break
 
             # 5. التنسيق النهائي للرد
             # Relative Score Normalization: نسبة كل مادة من الـ 3 النهائيين لأعلى
