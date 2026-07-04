@@ -3,9 +3,9 @@ import numpy as np
 import joblib
 import httpx
 import os
-from sklearn.cluster import KMeans
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
+from recommender import compute_track_scores, TRACK_PREFIX_MAP
 
 def extract_level(code):
     try:
@@ -45,16 +45,23 @@ def perform_training(data_url, model_path="wanees_model.pkl"):
             raw_students = _extract_list(client.get(data_url, headers=headers).json())
             catalog_data = _extract_list(client.get("https://rafeek-live.runasp.net/v1/api/ai/course/catalog", headers=headers).json())
         if not raw_students or not catalog_data: return False
-        df = pd.DataFrame([{"GPA": s.get("gpa", 0.0), **{k.upper(): v for k, v in s.get("courseGrades", {}).items()}} for s in raw_students]).fillna(0)
-        prefix_map = {"Software Engineering": ["SWE"], "Computer Science": ["CS"], "Artificial Intelligence": ["AI"], "Bioinformatics": ["BIO"], "Information Technology": ["IT"], "Information Systems": ["IS"]}
-        track_df = pd.DataFrame(index=df.index)
-        for t, prefixes in prefix_map.items():
-            cols = [c for c in df.columns if any(c.startswith(p) for p in prefixes)]
-            track_df[t] = df[cols].mean(axis=1) if cols else 0.001
+
+        track_names = list(TRACK_PREFIX_MAP.keys())
+        student_grades = [{k.upper(): v for k, v in s.get("courseGrades", {}).items()} for s in raw_students]
+
+        # نفس المعادلة المستخدمة فى recommender.py بالظبط (mean × log(1+count) × variance
+        # dampener) بتُطبق هنا وقت التدريب، بدل الـ mean() البسيط القديم، لضمان تطابق
+        # الـ Features بين التدريب والاستدلال (Training/Inference Consistency).
+        track_matrix = [compute_track_scores(g, track_names) for g in student_grades]
+        track_df = pd.DataFrame(track_matrix, columns=track_names)
+
         scaler = StandardScaler(); student_vectors = scaler.fit_transform(track_df.values)
-        kmeans = KMeans(n_clusters=6, random_state=42, n_init=10).fit(student_vectors)
-        nn_model = NearestNeighbors(n_neighbors=6, metric="cosine").fit(student_vectors)
+
+        # KMeans كان بيتم تدريبه وحفظه بس مش مستخدم خالص فى recommender.py وقت
+        # الاستدلال - اتشال نهائيًا لتجنب تدريب/حفظ نموذج ميت (dead artifact).
+        n_neighbors = min(6, len(student_vectors))
+        nn_model = NearestNeighbors(n_neighbors=n_neighbors, metric="cosine").fit(student_vectors)
         c_v, c_c, c_n = build_course_vectors(catalog_data)
-        joblib.dump({"kmeans": kmeans, "nn_model": nn_model, "scaler": scaler, "student_vectors": student_vectors, "course_vectors": c_v, "course_codes": c_c, "course_names": c_n, "track_names": list(prefix_map.keys())}, model_path)
+        joblib.dump({"nn_model": nn_model, "scaler": scaler, "student_vectors": student_vectors, "course_vectors": c_v, "course_codes": c_c, "course_names": c_n, "track_names": track_names}, model_path)
         return True
     except Exception as e: print(f"Error: {e}"); return False
