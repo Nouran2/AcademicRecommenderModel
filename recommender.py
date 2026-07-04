@@ -6,6 +6,11 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger("wanees")
 
+# الحد الأدنى النسبي لسكور أي مادة من تراك مختلف عن التراك السائد، كنسبة من
+# أعلى سكور فى القائمة (0.65 = 65%). لو سكور المادة أقل من ده، متترشحش، حتى
+# لو كانت أفضل مرشح متاح فى تصنيفها - أفضلية الجودة على "تعبيه" 3 توصيات.
+DIVERSITY_MIN_SCORE_RATIO = 0.65
+
 # خريطة البادئات الموحّدة لكل تراك - مصدر واحد للحقيقة (Single Source of Truth).
 # نفس الخريطة دي بيستوردها trainer.py عشان يبني الـ student_vectors وقت التدريب
 # بنفس المعادلة اللي بتُستخدم هنا وقت الاستدلال.
@@ -152,14 +157,25 @@ class WanisEngine:
                 [(r["course_code"], round(r["score"], 4)) for r in sorted_recs[:10]],
             )
 
+            # قيد جودة إضافي: بعد اختيار المادة الأولى (الأعلى سكور، وعادة من
+            # التراك السائد بفعل الـ Boost)، أي مادة من تراك/تصنيف تاني لازم
+            # يكون سكورها على الأقل DIVERSITY_MIN_SCORE_RATIO من أعلى سكور فى
+            # القائمة، وإلا يتم استثناؤها. الهدف: منع ترشيح مواد ضعيفة جدًا بس
+            # لغرض "التنويع" - أفضلية الجودة على العدد. ده معناه إن ممكن يرجع
+            # أقل من 3 توصيات لو مفيش مواد تانية قوية بما يكفي.
+            top_score = sorted_recs[0]["score"] if sorted_recs else 0.0
+
             final = []
             used_categories = set()
 
             for r in sorted_recs:
                 cat = r["course_code"][:2]
-                if cat not in used_categories:
-                    final.append(r)
-                    used_categories.add(cat)
+                if cat in used_categories:
+                    continue
+                if final and r["score"] < DIVERSITY_MIN_SCORE_RATIO * top_score:
+                    continue
+                final.append(r)
+                used_categories.add(cat)
                 if len(final) == 3: break
 
             # 5. التنسيق النهائي للرد
